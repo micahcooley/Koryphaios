@@ -1,0 +1,181 @@
+@import "tailwindcss";
+
+/* ─── Geist / Inter Font ──────────────────────────────────────────────────── */
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600&display=swap');
+
+/* ─── Custom Theme Tokens ─────────────────────────────────────────────────── */
+@theme {
+  --color-surface-0: #0a0a0b;
+  --color-surface-1: #111113;
+  --color-surface-2: #1a1a1e;
+  --color-surface-3: #242428;
+  --color-surface-4: #2e2e34;
+  --color-border: #2a2a30;
+  --color-border-bright: #3a3a42;
+  --color-text-primary: #e8e8ed;
+  --color-text-secondary: #8b8b96;
+  --color-text-muted: #5a5a66;
+
+  /* Agent Glow Colors */
+  --color-glow-codex: rgba(0, 255, 255, 0.5);
+  --color-glow-gemini: rgba(128, 0, 128, 0.5);
+  --color-glow-claude: rgba(255, 165, 0, 0.5);
+  --color-glow-kory: rgba(255, 215, 0, 0.6);
+  --color-glow-test: rgba(0, 255, 128, 0.5);
+
+  --color-accent: #6366f1;
+  --color-accent-hover: #818cf8;
+  --color-success: #22c55e;
+  --color-error: #ef4444;
+  --color-warning: #f59e0b;
+
+  --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+  --font-mono: 'JetBrains Mono', 'SF Mono', 'Fira Code', monospace;
+}
+
+/* ─── Base Styles ─────────────────────────────────────────────────────────── */
+
+html {
+  color-scheme: dark;
+}
+
+body {
+  font-family: var(--font-sans);
+  background: var(--color-surface-0);
+  color: var(--color-text-primary);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* ─── macOS-style Window Chrome ───────────────────────────────────────────── */
+
+.window-chrome {
+  background: var(--color-surface-1);
+  border: 1px solid var(--color-border);
+  border-radius: 12px;
+  overflow: hidden;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
+}
+
+.window-titlebar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 12px 16px;
+  background: var(--color-surface-2);
+  border-bottom: 1px solid var(--color-border);
+  -webkit-app-region: drag;
+}
+
+.traffic-light {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  cursor: pointer;
+}
+
+.traffic-light.close { background: #ff5f57; }
+.traffic-light.minimize { background: #febc2e; }
+.traffic-light.maximize { background: #28c840; }
+
+/* ─── Neon Glow Classes ───────────────────────────────────────────────────── */
+
+.glow-codex {
+  box-shadow: 0 0 15px var(--color-glow-codex), 0 0 30px rgba(0, 255, 255, 0.15);
+  border-color: rgba(0, 255, 255, 0.3);
+}
+
+.glow-gemini {
+  box-shadow: 0 0 15px var(--color-glow-gemini), 0 0 30px rgba(128, 0, 128, 0.15);
+  border-color: rgba(128, 0, 128, 0.3);
+}
+
+.glow-claude {
+  box-shadow: 0 0 15px var(--color-glow-claude), 0 0 30px rgba(255, 165, 0, 0.15);
+  border-color: rgba(255, 165, 0, 0.3);
+}
+
+.glow-kory {
+  box-shadow: 0 0 15px var(--color-glow-kory), 0 0 30px rgba(255, 215, 0, 0.15), inset 0 0 8px rgba(255, 215, 0, 0.05);
+  border-color: rgba(255, 215, 0, 0.4);
+}
+
+.glow-test {
+  box-shadow: 0 0 15px var(--color-glow-test), 0 0 30px rgba(0, 255, 128, 0.15);
+  border-color: rgba(0, 255, 128, 0.3);
+}
+
+/* Pulse animation for active agents */
+@keyframes glow-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.6; }
+}
+
+.glow-active {
+  animation: glow-pulse 2s ease-in-out infinite;
+}
+
+/* ─── Scrollbar Styling ───────────────────────────────────────────────────── */
+
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--color-surface-4);
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--color-border-bright);
+}
+
+/* ─── Code Block Styling ──────────────────────────────────────────────────── */
+
+pre, code {
+  font-family: var(--font-mono);
+}
+
+pre {
+  background: var(--color-surface-0);
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  padding: 12px 16px;
+  overflow-x: auto;
+  font-size: 13px;
+  line-height: 1.6;
+}
+
+/* ─── Bento Grid Layout ──────────────────────────────────────────────────── */
+
+.bento-grid {
+  display: grid;
+  gap: 12px;
+  padding: 12px;
+  height: 100vh;
+  grid-template-columns: 280px 1fr 320px;
+  grid-template-rows: auto 1fr auto;
+  grid-template-areas:
+    "sidebar header  providers"
+    "sidebar feed    terminal"
+    "sidebar input   terminal";
+}
+
+@media (max-width: 1200px) {
+  .bento-grid {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto auto 1fr auto auto;
+    grid-template-areas:
+      "header"
+      "providers"
+      "feed"
+      "terminal"
+      "input";
+  }
+}
