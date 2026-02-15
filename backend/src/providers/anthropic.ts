@@ -1,5 +1,6 @@
 // Anthropic Claude provider — supports Claude 3.5/3.7/4 Sonnet, Opus, Haiku.
 // Uses extended thinking for reasoning models. Never restricts output quality.
+// Supports both API key and Claude Code OAuth token (Pro/Max subscription).
 
 import Anthropic from "@anthropic-ai/sdk";
 import type { ProviderConfig } from "@koryphaios/shared";
@@ -10,6 +11,30 @@ import {
   type ProviderContentBlock,
   getModelsForProvider,
 } from "./types";
+import { readFileSync, existsSync } from "fs";
+import { join } from "path";
+import { homedir } from "os";
+
+export function detectClaudeCodeToken(): string | null {
+  const configPaths = [
+    join(homedir(), ".claude", ".credentials.json"),
+  ];
+
+  for (const path of configPaths) {
+    if (!existsSync(path)) continue;
+    try {
+      const data = JSON.parse(readFileSync(path, "utf-8"));
+      // credentials.json has { "authToken": "..." } or { "oauth_token": "..." }
+      if (data?.authToken) return data.authToken;
+      if (data?.oauth_token) return data.oauth_token;
+    } catch {
+      continue;
+    }
+  }
+
+  // Also check environment
+  return process.env.CLAUDE_CODE_OAUTH_TOKEN ?? null;
+}
 
 export class AnthropicProvider implements Provider {
   readonly name = "anthropic" as const;
@@ -18,12 +43,13 @@ export class AnthropicProvider implements Provider {
   constructor(readonly config: ProviderConfig) {
     this.client = new Anthropic({
       apiKey: config.apiKey,
+      authToken: config.authToken,
       ...(config.baseUrl && { baseURL: config.baseUrl }),
     });
   }
 
   isAvailable(): boolean {
-    return !this.config.disabled && !!this.config.apiKey;
+    return !this.config.disabled && !!(this.config.apiKey || this.config.authToken);
   }
 
   listModels() {
@@ -47,12 +73,25 @@ export class AnthropicProvider implements Provider {
       ...(tools?.length && { tools }),
     };
 
-    // Enable extended thinking for reasoning models — never restrict budget
-    if (request.reasoningEffort) {
-      (params as any).thinking = {
-        type: "enabled",
-        budget_tokens: request.maxTokens ?? 16_384,
-      };
+    // Enable extended thinking for reasoning models — ensure budget allows for output
+    if (request.reasoningLevel) {
+      const outputTokens = request.maxTokens ?? 16_384;
+      let thinkingBudget = 8192; // Default medium
+
+      if (request.reasoningLevel === "low") thinkingBudget = 4096;
+      else if (request.reasoningLevel === "medium") thinkingBudget = 8192;
+      else if (request.reasoningLevel === "high") thinkingBudget = 32768;
+      else if (request.reasoningLevel === "max" || request.reasoningLevel === "xhigh") thinkingBudget = 65536;
+      else if (!isNaN(Number(request.reasoningLevel))) thinkingBudget = Number(request.reasoningLevel);
+
+      if (thinkingBudget > 0) {
+        (params as any).thinking = {
+          type: "enabled",
+          budget_tokens: thinkingBudget,
+        };
+        // Total max_tokens must include both thinking and output
+        params.max_tokens = thinkingBudget + outputTokens;
+      }
     }
 
     try {

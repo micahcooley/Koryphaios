@@ -61,6 +61,7 @@ export class MCPClient {
   private tools: MCPToolDef[] = [];
   private connected = false;
   private serverName: string;
+  private serverCapabilities: Record<string, unknown> = {};
 
   constructor(private config: MCPServerConfig) {
     this.serverName = config.name;
@@ -117,12 +118,20 @@ export class MCPClient {
       },
     });
 
+    this.serverCapabilities = (initResult.result as any).capabilities ?? {};
+
     // Send initialized notification
     this.notify("notifications/initialized", {});
 
-    // List available tools
-    const toolsResult = await this.request("tools/list", {});
-    this.tools = (toolsResult.result as any)?.tools ?? [];
+    // List available tools if server supports them
+    if (this.serverCapabilities.tools) {
+      try {
+        const toolsResult = await this.request("tools/list", {});
+        this.tools = (toolsResult.result as any)?.tools ?? [];
+      } catch (err: any) {
+        mcpLog.warn({ server: this.serverName, err: err.message }, "Failed to list tools despite capability");
+      }
+    }
 
     this.connected = true;
     mcpLog.info({ server: this.serverName, tools: this.tools.length }, "MCP connected via stdio");

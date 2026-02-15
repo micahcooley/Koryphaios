@@ -12,8 +12,8 @@
       "disabled": false,
       "baseUrl": "https://api.openai.com/v1"
     },
-    "gemini": {
-      "name": "gemini",
+    "google": {
+      "name": "google",
       "disabled": false
     },
     "groq": {
@@ -30,14 +30,14 @@
   
   "agents": {
     "manager": {
-      "model": "claude-sonnet-4-20250514",
+      "model": "claude-sonnet-4-5",
       "maxTokens": 8192,
-      "reasoningEffort": "high"
+      "reasoningLevel": "high"
     },
     "coder": {
-      "model": "claude-sonnet-4-20250514",
+      "model": "claude-sonnet-4-5",
       "maxTokens": 16384,
-      "reasoningEffort": "medium"
+      "reasoningLevel": "medium"
     },
     "task": {
       "model": "o4-mini",

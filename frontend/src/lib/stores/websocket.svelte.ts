@@ -21,6 +21,7 @@ import type {
   Session,
 } from "@koryphaios/shared";
 import { sessionStore } from './sessions.svelte';
+import { browser } from '$app/environment';
 
 // ─── Agent State ────────────────────────────────────────────────────────────
 
@@ -52,12 +53,34 @@ export interface FeedEntry {
 
 let wsConnection = $state<WebSocket | null>(null);
 let connectionStatus = $state<"connecting" | "connected" | "disconnected" | "error">("disconnected");
-let agents = $state<Map<string, AgentState>>(new Map());
 let feed = $state<FeedEntry[]>([]);
 let providers = $state<ProviderStatusPayload["providers"]>([]);
 let koryThought = $state<string>("");
 let koryPhase = $state<string>("");
 let pendingPermissions = $state<PermissionRequest[]>([]);
+
+// Initialize manager agent state
+const initialAgents = new Map<string, AgentState>();
+initialAgents.set("kory-manager", {
+  identity: {
+    id: "kory-manager",
+    name: "Kory",
+    role: "manager",
+    model: "claude-sonnet-4-5",
+    provider: "anthropic",
+    domain: "general",
+    glowColor: "rgba(255,215,0,0.6)",
+  },
+  status: "idle",
+  content: "",
+  thinking: "",
+  toolCalls: [],
+  task: "Orchestrating...",
+  tokensUsed: 0,
+  contextMax: 200000,
+});
+
+let agents = $state<Map<string, AgentState>>(initialAgents);
 
 // File edit streaming state (Cursor-style live preview)
 interface ActiveFileEdit {
@@ -78,7 +101,7 @@ function resolveGlowClass(agent?: AgentIdentity): string {
   if (!agent) return "";
   switch (agent.domain) {
     case "ui": return "glow-codex";
-    case "backend": return "glow-gemini";
+    case "backend": return "glow-google";
     case "general": return "glow-claude";
     case "review": return "glow-claude";
     case "test": return "glow-test";
@@ -91,6 +114,19 @@ function resolveGlowClass(agent?: AgentIdentity): string {
 function addFeedEntry(entry: Omit<FeedEntry, "id">) {
   const newEntry: FeedEntry = { ...entry, id: `fe-${++feedIdCounter}` };
   feed = [...feed, newEntry].slice(-MAX_FEED_ENTRIES);
+}
+
+// Accumulate streaming text into the last matching feed entry instead of creating one per token
+function accumulateFeedEntry(entry: Omit<FeedEntry, "id">) {
+  const lastIdx = feed.length - 1;
+  const last = lastIdx >= 0 ? feed[lastIdx] : null;
+  if (last && last.type === entry.type && last.agentId === entry.agentId) {
+    // Mutate-then-replace to avoid creating a new entry per token
+    const updated = { ...last, text: last.text + entry.text, timestamp: entry.timestamp };
+    feed = [...feed.slice(0, lastIdx), updated];
+  } else {
+    addFeedEntry(entry);
+  }
 }
 
 function addUserMessage(sessionId: string, content: string) {
@@ -178,7 +214,7 @@ function handleMessage(msg: WSMessage) {
         agent.status = "streaming";
         agents = new Map(agents);
       }
-      addFeedEntry({
+      accumulateFeedEntry({
         timestamp: msg.timestamp,
         type: "content",
         agentId: p.agentId,
@@ -196,7 +232,7 @@ function handleMessage(msg: WSMessage) {
         agent.thinking += p.thinking;
         agents = new Map(agents);
       }
-      addFeedEntry({
+      accumulateFeedEntry({
         timestamp: msg.timestamp,
         type: "thinking",
         agentId: p.agentId,
@@ -353,6 +389,7 @@ let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 let reconnectAttempts = 0;
 
 function connect(url?: string) {
+  if (!browser) return;
   if (wsConnection?.readyState === WebSocket.OPEN) return;
 
   const wsUrl = url ?? `ws://${window.location.hostname}:3000/ws`;
@@ -371,7 +408,7 @@ function connect(url?: string) {
       try {
         const msg = JSON.parse(event.data) as WSMessage;
         handleMessage(msg);
-      } catch {}
+      } catch { }
     };
 
     ws.onclose = () => {
@@ -403,13 +440,13 @@ function disconnect() {
   connectionStatus = "disconnected";
 }
 
-function sendMessage(sessionId: string, content: string) {
+function sendMessage(sessionId: string, content: string, model?: string, reasoningLevel?: string) {
   addUserMessage(sessionId, content);
   fetch("/api/messages", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ sessionId, content }),
-  }).catch(() => {});
+    body: JSON.stringify({ sessionId, content, model, reasoningLevel }),
+  }).catch(() => { });
 }
 
 function respondToPermission(id: string, approved: boolean) {
@@ -421,6 +458,55 @@ function respondToPermission(id: string, approved: boolean) {
     }));
   }
   pendingPermissions = pendingPermissions.filter(perm => perm.id !== id);
+}
+
+// ─── Session Message Loading ────────────────────────────────────────────────
+
+function loadSessionMessages(sessionId: string, messages: Array<{ id: string; role: string; content: string; createdAt: number; model?: string; cost?: number }>) {
+  // Clear current feed and populate with historical messages
+  feed = messages.map((m) => ({
+    id: `hist-${m.id}`,
+    timestamp: m.createdAt,
+    type: m.role === "user" ? "user_message" as const : "content" as const,
+    agentId: m.role === "user" ? "user" : "kory-manager",
+    agentName: m.role === "user" ? "You" : "Kory",
+    glowClass: m.role === "user" ? "" : "glow-kory",
+    text: m.content,
+    metadata: { sessionId, model: m.model, cost: m.cost },
+  }));
+}
+
+function removeEntries(ids: Set<string>) {
+  feed = feed.filter(e => !ids.has(e.id));
+}
+
+// ─── Derived helpers ────────────────────────────────────────────────────────
+
+function getManagerStatus(): AgentStatus {
+  const manager = agents.get('kory-manager');
+  if (manager) return manager.status;
+  // Fallback: if any agent is active, infer from their states
+  for (const a of agents.values()) {
+    if (a.status !== 'idle' && a.status !== 'done') return a.status;
+  }
+  return 'idle';
+}
+
+function getContextUsage(): { used: number; max: number; percent: number } {
+  const manager = agents.get('kory-manager');
+  if (manager && manager.contextMax > 0) {
+    const percent = Math.min(100, Math.round((manager.tokensUsed / manager.contextMax) * 100));
+    return { used: manager.tokensUsed, max: manager.contextMax, percent };
+  }
+  // Aggregate across all agents
+  let totalUsed = 0;
+  let maxCtx = 128000;
+  for (const a of agents.values()) {
+    totalUsed += a.tokensUsed;
+    if (a.contextMax > 0) maxCtx = Math.max(maxCtx, a.contextMax);
+  }
+  const percent = maxCtx > 0 ? Math.min(100, Math.round((totalUsed / maxCtx) * 100)) : 0;
+  return { used: totalUsed, max: maxCtx, percent };
 }
 
 // ─── Exported Store ─────────────────────────────────────────────────────────
@@ -435,9 +521,13 @@ export const wsStore = {
   get koryPhase() { return koryPhase; },
   get pendingPermissions() { return pendingPermissions; },
   get activeFileEdits() { return activeFileEdits; },
+  get managerStatus() { return getManagerStatus(); },
+  get contextUsage() { return getContextUsage(); },
   connect,
   disconnect,
   sendMessage,
+  loadSessionMessages,
+  removeEntries,
   respondToPermission,
   clearFeed() { feed = []; },
 };

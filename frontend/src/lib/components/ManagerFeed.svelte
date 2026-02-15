@@ -14,7 +14,31 @@
     Search,
     Filter,
     ArrowDown,
+    Trash2,
   } from 'lucide-svelte';
+  import AnimatedStatusIcon from './AnimatedStatusIcon.svelte';
+  import { marked } from 'marked';
+  import hljs from 'highlight.js';
+  import 'highlight.js/styles/atom-one-dark.css';
+
+  // Configure marked with syntax highlighting
+  const renderer = new marked.Renderer();
+  renderer.code = ({ text, lang }: { text: string, lang?: string }) => {
+    const language = lang && hljs.getLanguage(lang) ? lang : 'plaintext';
+    const highlighted = hljs.highlight(text, { language }).value;
+    return `<pre><code class="hljs language-${language}">${highlighted}</code></pre>`;
+  };
+  
+  marked.setOptions({ renderer });
+
+  function renderMarkdown(text: string): string {
+    try {
+      if (!text) return '';
+      return marked.parse(text, { async: false }) as string;
+    } catch {
+      return text;
+    }
+  }
 
   type FeedEntryType = "user_message" | "thought" | "content" | "thinking" | "tool_call" | "tool_result" | "routing" | "error" | "system";
 
@@ -29,8 +53,10 @@
     metadata?: Record<string, unknown>;
   }
 
-  let feedContainer: HTMLDivElement;
+  let feedContainer = $state<HTMLDivElement>();
   let autoScroll = $state(true);
+  let selectedEntries = $state<Set<string>>(new Set());
+  let lastSelectedId = $state<string>('');
 
   let filteredFeed = $derived(wsStore.feed as FeedEntryLocal[]);
 
@@ -38,7 +64,7 @@
     const len = filteredFeed.length;
     if (autoScroll && feedContainer) {
       tick().then(() => {
-        feedContainer.scrollTop = feedContainer.scrollHeight;
+        if (feedContainer) feedContainer.scrollTop = feedContainer.scrollHeight;
       });
     }
   });
@@ -49,19 +75,51 @@
     autoScroll = scrollHeight - scrollTop - clientHeight < 100;
   }
 
-  function getEntryIcon(type: FeedEntryType) {
-    switch (type) {
-      case 'user_message': return Send;
-      case 'thought': return Brain;
-      case 'content': return MessageSquare;
-      case 'thinking': return MessageSquare;
-      case 'tool_call': return Wrench;
-      case 'tool_result': return Box;
-      case 'routing': return ArrowRightLeft;
-      case 'error': return AlertCircle;
-      case 'system': return Zap;
-      default: return MessageSquare;
+  function handleEntryClick(entry: FeedEntryLocal, e: MouseEvent) {
+    if (e.shiftKey) {
+      // Range select
+      e.preventDefault();
+      const next = new Set(selectedEntries);
+      if (lastSelectedId) {
+        const ids = filteredFeed.map(f => f.id);
+        const startIdx = ids.indexOf(lastSelectedId);
+        const endIdx = ids.indexOf(entry.id);
+        if (startIdx >= 0 && endIdx >= 0) {
+          const [lo, hi] = startIdx < endIdx ? [startIdx, endIdx] : [endIdx, startIdx];
+          for (let i = lo; i <= hi; i++) next.add(ids[i]);
+        }
+      } else {
+        next.add(entry.id);
+      }
+      selectedEntries = next;
+      lastSelectedId = entry.id;
+    } else if (e.ctrlKey) {
+      // Toggle individual selection
+      e.preventDefault();
+      const next = new Set(selectedEntries);
+      if (next.has(entry.id)) {
+        next.delete(entry.id);
+      } else {
+        next.add(entry.id);
+      }
+      selectedEntries = next;
+      lastSelectedId = entry.id;
+    } else {
+      // Normal click — set anchor, clear previous selection
+      selectedEntries = new Set([entry.id]);
+      lastSelectedId = entry.id;
     }
+  }
+
+  function deleteSelected() {
+    if (selectedEntries.size === 0) return;
+    wsStore.removeEntries(selectedEntries);
+    selectedEntries = new Set();
+    lastSelectedId = '';
+  }
+
+  function deleteSingle(id: string) {
+    wsStore.removeEntries(new Set([id]));
   }
 
   function getEntryColor(type: FeedEntryType): string {
@@ -78,23 +136,50 @@
       default: return 'text-text-secondary';
     }
   }
+
+  /** Map feed entry types to the closest AgentStatus for animated icon */
+  function getStatusForType(type: FeedEntryType): import('@koryphaios/shared').AgentStatus {
+    switch (type) {
+      case 'user_message': return 'idle';
+      case 'thought': return 'thinking';
+      case 'content': return 'streaming';
+      case 'thinking': return 'thinking';
+      case 'tool_call': return 'tool_calling';
+      case 'tool_result': return 'done';
+      case 'routing': return 'verifying';
+      case 'error': return 'error';
+      case 'system': return 'idle';
+      default: return 'idle';
+    }
+  }
 </script>
 
 <div class="flex flex-col flex-1 overflow-hidden">
-  <div class="panel-header">
-    <span class="panel-title">
+  <div class="panel-header flex items-center justify-between">
+    <span class="panel-title flex items-center gap-1.5">
       <MessageSquare size={14} />
       Agent Feed
     </span>
-    {#if !autoScroll}
-      <button
-        onclick={() => { autoScroll = true; feedContainer.scrollTop = feedContainer.scrollHeight; }}
-        class="btn btn-secondary"
-        style="padding: 4px 8px; font-size: 10px;"
-      >
-        <ArrowDown size={10} class="inline mr-1" />Scroll to bottom
-      </button>
-    {/if}
+    <div class="flex items-center gap-2">
+      {#if selectedEntries.size > 0}
+        <button
+          onclick={deleteSelected}
+          class="btn btn-secondary flex items-center gap-1"
+          style="padding: 4px 8px; font-size: 10px; color: var(--color-error);"
+        >
+          <Trash2 size={10} />Delete {selectedEntries.size}
+        </button>
+      {/if}
+      {#if !autoScroll}
+        <button
+          onclick={() => { autoScroll = true; feedContainer?.scrollTop !== undefined && (feedContainer.scrollTop = feedContainer.scrollHeight); }}
+          class="btn btn-secondary flex items-center gap-1"
+          style="padding: 4px 8px; font-size: 10px;"
+        >
+          <ArrowDown size={10} />Bottom
+        </button>
+      {/if}
+    </div>
   </div>
 
   <div
@@ -103,38 +188,103 @@
     class="flex-1 overflow-y-auto p-3 space-y-1"
   >
     {#if filteredFeed.length === 0}
-      <div class="empty-state">
-        <MessageSquare size={32} class="empty-state-icon" />
-        <p class="text-sm">Ready for your request</p>
-        <p class="text-xs mt-1">Type a message below to get started</p>
+      <div class="flex-1 flex flex-col items-center justify-center text-center">
+        <MessageSquare size={32} class="empty-state-icon mb-3" style="color: var(--color-text-muted); opacity: 0.3;" />
+        <p class="text-sm" style="color: var(--color-text-secondary);">Ready for your request</p>
+        <p class="text-xs mt-1" style="color: var(--color-text-muted);">Type a message below to get started</p>
       </div>
     {:else}
       {#each filteredFeed as entry (entry.id)}
-        {@const EntryIcon = getEntryIcon(entry.type)}
-        <div class="flex gap-2 py-1 text-sm leading-relaxed group hover:bg-surface-2/30 rounded px-2 -mx-2 transition-colors {entry.type === 'user_message' ? 'feed-user-message' : ''}">
-          <span class="text-xs text-text-muted shrink-0 pt-0.5 w-16">
+        <div
+          class="flex items-start gap-2.5 py-1.5 text-sm leading-relaxed group rounded px-2 -mx-2 transition-colors cursor-default
+                 {entry.type === 'user_message' ? 'feed-user-message' : ''}
+                 {selectedEntries.has(entry.id) ? 'bg-[var(--color-accent)]/10 ring-1 ring-[var(--color-accent)]/30' : 'hover:bg-surface-2/30'}"
+          onclick={(e) => handleEntryClick(entry, e)}
+          onkeydown={(e) => { if (e.key === 'Enter' || e.key === ' ') handleEntryClick(entry, e as unknown as MouseEvent); }}
+          role="row"
+          tabindex="0"
+        >
+          <span class="text-xs text-text-muted shrink-0 w-16 leading-5 tabular-nums">
             {new Date(entry.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}
           </span>
 
-          {#if entry.glowClass}
-            <span class="w-1.5 h-1.5 rounded-full mt-2 shrink-0 {entry.glowClass === 'glow-kory' ? 'bg-yellow-400' : entry.glowClass === 'glow-codex' ? 'bg-cyan-400' : entry.glowClass === 'glow-gemini' ? 'bg-purple-500' : entry.glowClass === 'glow-claude' ? 'bg-orange-400' : 'bg-green-400'}"></span>
-          {:else if entry.type === 'user_message'}
-            <span class="w-1.5 h-1.5 rounded-full mt-2 shrink-0 bg-accent"></span>
+          {#if entry.type === 'user_message'}
+            <div class="shrink-0 flex items-center justify-center w-[14px] h-5">
+              <Send size={13} class="text-accent" />
+            </div>
           {:else}
-            <span class="w-1.5 h-1.5 rounded-full mt-2 shrink-0 bg-surface-4"></span>
+            <div
+              class="shrink-0 flex items-center justify-center w-[14px] h-5"
+              style={getStatusForType(entry.type) === 'thinking' ? 'transform: translateY(7px);' : ''}
+            >
+              <AnimatedStatusIcon status={getStatusForType(entry.type)} size={14} isManager={entry.agentId === 'kory-manager'} />
+            </div>
           {/if}
 
-          <div class="flex-1 min-w-0">
-            <span class="text-xs font-medium {entry.glowClass === 'glow-kory' ? 'text-yellow-400' : entry.type === 'user_message' ? 'text-accent' : 'text-text-secondary'}">
-              {entry.agentName}
-            </span>
-            <EntryIcon size={12} class="inline mx-1 text-text-muted" />
-            <span class="{getEntryColor(entry.type)} break-words">
-              {entry.text}
-            </span>
-          </div>
+            <div class="flex-1 min-w-0 {entry.type === 'content' ? 'markdown-content' : ''}">
+              <span class="text-xs font-medium {entry.glowClass === 'glow-kory' ? 'text-yellow-400' : entry.type === 'user_message' ? 'text-accent' : 'text-text-secondary'}">
+                {entry.agentName}
+              </span>
+              {#if entry.type === 'user_message' || entry.type === 'content' || entry.type === 'thought' || entry.type === 'tool_result'}
+                 <div class="{getEntryColor(entry.type)} break-words ml-1 markdown-content">
+                   {@html renderMarkdown(entry.text)}
+                 </div>
+              {:else}
+                 <span class="{getEntryColor(entry.type)} break-words ml-1">
+                   {entry.text}
+                 </span>
+              {/if}
+            </div>
+
+          <button
+            class="shrink-0 p-1 rounded opacity-0 group-hover:opacity-60 hover:!opacity-100 transition-opacity flex items-center justify-center"
+            style="color: var(--color-text-muted);"
+            onclick={(e) => { e.stopPropagation(); deleteSingle(entry.id); }}
+            title="Delete message (hold Shift+click to select multiple)"
+          >
+            <Trash2 size={12} />
+          </button>
         </div>
       {/each}
     {/if}
   </div>
 </div>
+
+<style>
+  :global(.markdown-content) { font-size: 13px; line-height: 1.5; }
+  :global(.markdown-content p) { margin-bottom: 0.5em; }
+  :global(.markdown-content p:last-child) { margin-bottom: 0; }
+  :global(.markdown-content pre) { 
+    background: var(--color-surface-0); 
+    padding: 0.75em; 
+    border-radius: 6px; 
+    overflow-x: auto; 
+    margin: 0.5em 0; 
+    border: 1px solid var(--color-border);
+  }
+  :global(.markdown-content code) { 
+    font-family: 'JetBrains Mono', monospace; 
+    font-size: 12px;
+  }
+  :global(.markdown-content :not(pre) > code) {
+    background: var(--color-surface-2);
+    padding: 0.1em 0.3em;
+    border-radius: 3px;
+    color: var(--color-accent);
+  }
+  :global(.markdown-content ul, :global(.markdown-content ol)) { margin-left: 1.25em; margin-bottom: 0.5em; list-style: disc; }
+  :global(.markdown-content ol) { list-style: decimal; }
+  :global(.markdown-content blockquote) { 
+    border-left: 3px solid var(--color-border); 
+    padding-left: 0.75em; 
+    color: var(--color-text-muted);
+    font-style: italic;
+  }
+  :global(.markdown-content a) { color: var(--color-accent); text-decoration: underline; }
+  :global(.markdown-content h1, :global(.markdown-content h2), :global(.markdown-content h3)) { 
+    font-weight: 600; 
+    margin-top: 1em; 
+    margin-bottom: 0.5em; 
+    color: var(--color-text-primary);
+  }
+</style>

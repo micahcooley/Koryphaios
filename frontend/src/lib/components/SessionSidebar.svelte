@@ -3,6 +3,7 @@
   import { sessionStore } from '$lib/stores/sessions.svelte';
   import { wsStore } from '$lib/stores/websocket.svelte';
   import { Plus, Search, Pencil, Trash2, Check, X, MessageSquare } from 'lucide-svelte';
+  import AnimatedStatusIcon from './AnimatedStatusIcon.svelte';
 
   interface Props {
     currentSessionId?: string;
@@ -18,23 +19,24 @@
     sessionStore.fetchSessions();
   });
 
+  // Sync activeSessionId to local currentSessionId
   $effect(() => {
     if (sessionStore.activeSessionId && sessionStore.activeSessionId !== currentSessionId) {
       currentSessionId = sessionStore.activeSessionId;
+      // Load historical messages if we just switched to this session from outside (e.g. initial load)
+      void loadHistory(sessionStore.activeSessionId);
     }
   });
 
-  $effect(() => {
-    if (currentSessionId && currentSessionId !== sessionStore.activeSessionId) {
-      sessionStore.activeSessionId = currentSessionId;
-    }
-  });
-
-  async function selectSession(id: string) {
-    currentSessionId = id;
-    // Load historical messages into the feed
+  async function loadHistory(id: string) {
     const messages = await sessionStore.fetchMessages(id);
     wsStore.loadSessionMessages(id, messages);
+  }
+
+  async function selectSession(id: string) {
+    if (sessionStore.activeSessionId === id) return;
+    sessionStore.activeSessionId = id;
+    await loadHistory(id);
   }
 
   function startRename(id: string, currentTitle: string) {
@@ -54,8 +56,9 @@
     editTitle = '';
   }
 
-  function confirmDelete(id: string) {
-    if (confirmDeleteId === id) {
+  function confirmDelete(e: MouseEvent, id: string) {
+    e.stopPropagation();
+    if (e.shiftKey || confirmDeleteId === id) {
       sessionStore.deleteSession(id);
       confirmDeleteId = '';
     } else {
@@ -77,9 +80,9 @@
 <div class="h-full flex flex-col" style="background: var(--color-surface-1);">
   <!-- Header -->
   <div class="flex items-center justify-between px-3 py-3 border-b" style="border-color: var(--color-border);">
-    <span class="text-sm font-semibold" style="color: var(--color-text-primary);">Sessions</span>
+    <span class="text-sm font-semibold leading-none" style="color: var(--color-text-primary);">Sessions</span>
     <button
-      class="p-1.5 rounded-lg transition-colors hover:bg-[var(--color-surface-3)]"
+      class="p-1.5 rounded-lg transition-colors hover:bg-[var(--color-surface-3)] flex items-center justify-center"
       style="color: var(--color-text-secondary);"
       onclick={() => sessionStore.createSession()}
       title="New session (Ctrl+N)"
@@ -90,13 +93,13 @@
 
   <!-- Search -->
   <div class="px-3 py-2">
-    <div class="relative">
+    <div class="relative flex items-center">
       <Search size={14} class="absolute left-2.5 top-1/2 -translate-y-1/2 pointer-events-none" style="color: var(--color-text-muted);" />
       <input
         type="text"
         placeholder="Search sessions..."
-        class="input text-xs h-8"
-        style="padding-left: 44px;"
+        class="input text-xs h-8 w-full"
+        style="padding-left: 32px;"
         bind:value={sessionStore.searchQuery}
       />
     </div>
@@ -113,7 +116,7 @@
           <div
             role="button"
             tabindex="0"
-            class="session-item group flex items-center gap-2 px-2 py-2 mx-1 rounded-lg cursor-pointer transition-colors {sessionStore.activeSessionId === session.id ? 'active-session' : 'hover:bg-[var(--color-surface-2)]'}"
+            class="session-item group flex items-center gap-2.5 px-2.5 py-2.5 mx-1 rounded-lg cursor-pointer transition-colors {sessionStore.activeSessionId === session.id ? 'active-session' : 'hover:bg-[var(--color-surface-2)]'}"
             onclick={() => selectSession(session.id)}
             onkeydown={(e) => { if (e.key === 'Enter') selectSession(session.id); }}
             ondblclick={() => startRename(session.id, session.title)}
@@ -137,7 +140,13 @@
                 </button>
               </div>
             {:else}
-              <MessageSquare size={14} class="shrink-0" style="color: var(--color-text-muted);" />
+              {#if sessionStore.activeSessionId === session.id && wsStore.managerStatus !== 'idle'}
+                <div class="shrink-0 flex items-center justify-center" style="width: 16px; height: 16px;">
+                  <AnimatedStatusIcon status={wsStore.managerStatus} size={14} isManager={true} />
+                </div>
+              {:else}
+                <MessageSquare size={14} class="shrink-0 relative top-[-2px]" style="color: var(--color-text-muted);" />
+              {/if}
               <div class="flex-1 min-w-0">
                 <div class="text-xs truncate" style="color: var(--color-text-primary);">{session.title}</div>
                 <div class="flex items-center gap-2 mt-0.5">
@@ -162,8 +171,8 @@
                 <button
                   class="p-1 rounded hover:bg-[var(--color-surface-4)] transition-colors"
                   style="color: {confirmDeleteId === session.id ? 'var(--color-error)' : 'var(--color-text-muted)'};"
-                  onclick={(e) => { e.stopPropagation(); confirmDelete(session.id); }}
-                  title={confirmDeleteId === session.id ? 'Click again to confirm' : 'Delete'}
+                  onclick={(e) => confirmDelete(e, session.id)}
+                  title={confirmDeleteId === session.id ? 'Click again to confirm' : 'Delete (Shift+Click to skip confirmation)'}
                 >
                   <Trash2 size={12} />
                 </button>
@@ -176,7 +185,7 @@
 
     {#if sessionStore.filteredSessions.length === 0}
       <div class="flex flex-col items-center justify-center py-8" style="color: var(--color-text-muted);">
-        <MessageSquare size={24} class="mb-2 opacity-40" />
+        <MessageSquare size={24} class="mb-2 opacity-40 relative top-[-2px]" />
         <p class="text-xs">{sessionStore.searchQuery ? 'No matching sessions' : 'No sessions yet'}</p>
       </div>
     {/if}

@@ -77,11 +77,13 @@ export function validateSessionId(id: unknown): string | null {
 
 export function validateProviderName(name: unknown): string | null {
   const VALID_PROVIDERS = new Set([
-    "anthropic", "openai", "gemini", "copilot", "openrouter",
+    "anthropic", "openai", "google", "gemini", "copilot", "codex", "openrouter",
     "groq", "xai", "azure", "bedrock", "vertexai", "local",
   ]);
   if (typeof name !== "string") return null;
   if (!VALID_PROVIDERS.has(name)) return null;
+  // Normalize aliases to canonical registry names
+  if (name === "gemini") return "google";
   return name;
 }
 

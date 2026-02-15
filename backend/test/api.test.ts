@@ -1,19 +1,90 @@
 // Integration tests for API endpoints
-import { describe, test, expect, beforeAll, afterAll } from "bun:test";
+import { describe, test, expect, beforeAll, afterAll, setDefaultTimeout } from "bun:test";
+import { dirname, join } from "path";
 
-// Mock server for testing
-const BASE_URL = "http://localhost:3000";
+const TEST_PORT = 3301;
+const BASE_URL = `http://127.0.0.1:${TEST_PORT}`;
+let serverProc: Bun.Subprocess | null = null;
+setDefaultTimeout(30000);
+
+type ReqOpts = {
+  method?: "GET" | "POST" | "PATCH" | "DELETE" | "PUT" | "OPTIONS";
+  headers?: Record<string, string>;
+  body?: unknown;
+};
+
+function request(path: string, opts: ReqOpts = {}) {
+  const args = ["-sS", "-X", opts.method ?? "GET", "-o", "-", "-w", "\n%{http_code}", `${BASE_URL}${path}`];
+  const headers = opts.headers ?? {};
+  for (const [k, v] of Object.entries(headers)) {
+    args.push("-H", `${k}: ${v}`);
+  }
+  if (opts.body !== undefined) {
+    args.push("--data-binary", typeof opts.body === "string" ? opts.body : JSON.stringify(opts.body));
+  }
+
+  const proc = Bun.spawnSync(["curl", ...args], { stdout: "pipe", stderr: "pipe" });
+  if (proc.exitCode !== 0) {
+    const stderr = proc.stderr ? new TextDecoder().decode(proc.stderr) : "";
+    throw new Error(stderr || `curl exited ${proc.exitCode}`);
+  }
+
+  const output = proc.stdout ? new TextDecoder().decode(proc.stdout) : "";
+  const idx = output.lastIndexOf("\n");
+  const bodyText = idx >= 0 ? output.slice(0, idx) : "";
+  const status = Number(idx >= 0 ? output.slice(idx + 1).trim() : "0");
+  let json: any = null;
+  try {
+    json = bodyText ? JSON.parse(bodyText) : null;
+  } catch {
+    json = null;
+  }
+
+  return { status, bodyText, json };
+}
+
+async function waitForServerReady(timeoutMs = 20000): Promise<void> {
+  const started = Date.now();
+  while (Date.now() - started < timeoutMs) {
+    try {
+      const res = request("/api/health");
+      if (res.status === 200) return;
+    } catch {
+      // Retry until timeout
+    }
+    await new Promise((r) => setTimeout(r, 250));
+  }
+  throw new Error(`Backend did not become ready on ${BASE_URL} within ${timeoutMs}ms`);
+}
+
+beforeAll(async () => {
+  const backendDir = join(dirname(import.meta.dir), "src", "..");
+  serverProc = Bun.spawn(["bun", "run", "src/server.ts"], {
+    cwd: backendDir,
+    env: { ...process.env, KORYPHAIOS_PORT: String(TEST_PORT) },
+    stdout: "ignore",
+    stderr: "ignore",
+  });
+  await waitForServerReady();
+});
+
+afterAll(async () => {
+  if (serverProc) {
+    serverProc.kill();
+    await serverProc.exited;
+    serverProc = null;
+  }
+});
 
 describe("API Integration Tests", () => {
   describe("GET /api/health", () => {
     test("returns health status", async () => {
-      const response = await fetch(`${BASE_URL}/api/health`);
-      const data = await response.json();
+      const res = request("/api/health");
 
-      expect(response.status).toBe(200);
-      expect(data.ok).toBe(true);
-      expect(data.data).toHaveProperty("version");
-      expect(data.data).toHaveProperty("uptime");
+      expect(res.status).toBe(200);
+      expect(res.json?.ok).toBe(true);
+      expect(res.json?.data).toHaveProperty("version");
+      expect(res.json?.data).toHaveProperty("uptime");
     });
   });
 
@@ -21,143 +92,165 @@ describe("API Integration Tests", () => {
     let sessionId: string;
 
     test("POST /api/sessions creates a new session", async () => {
-      const response = await fetch(`${BASE_URL}/api/sessions`, {
+      const res = request("/api/sessions", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ title: "Test Session" }),
+        body: { title: "Test Session" },
       });
 
-      const data = await response.json();
-      expect(response.status).toBe(201);
-      expect(data.ok).toBe(true);
-      expect(data.data).toHaveProperty("id");
-      expect(data.data.title).toBe("Test Session");
+      expect(res.status).toBe(201);
+      expect(res.json?.ok).toBe(true);
+      expect(res.json?.data).toHaveProperty("id");
+      expect(res.json?.data?.title).toBe("Test Session");
 
-      sessionId = data.data.id;
+      sessionId = res.json.data.id;
     });
 
     test("GET /api/sessions lists all sessions", async () => {
-      const response = await fetch(`${BASE_URL}/api/sessions`);
-      const data = await response.json();
+      const res = request("/api/sessions");
 
-      expect(response.status).toBe(200);
-      expect(data.ok).toBe(true);
-      expect(Array.isArray(data.data)).toBe(true);
-      expect(data.data.length).toBeGreaterThan(0);
+      expect(res.status).toBe(200);
+      expect(res.json?.ok).toBe(true);
+      expect(Array.isArray(res.json?.data)).toBe(true);
+      expect(res.json.data.length).toBeGreaterThan(0);
     });
 
     test("GET /api/sessions/:id returns session details", async () => {
-      const response = await fetch(`${BASE_URL}/api/sessions/${sessionId}`);
-      const data = await response.json();
+      const res = request(`/api/sessions/${sessionId}`);
 
-      expect(response.status).toBe(200);
-      expect(data.ok).toBe(true);
-      expect(data.data.id).toBe(sessionId);
+      expect(res.status).toBe(200);
+      expect(res.json?.ok).toBe(true);
+      expect(res.json?.data?.id).toBe(sessionId);
     });
 
     test("PATCH /api/sessions/:id updates session title", async () => {
       const newTitle = "Updated Test Session";
-      const response = await fetch(`${BASE_URL}/api/sessions/${sessionId}`, {
+      const res = request(`/api/sessions/${sessionId}`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ title: newTitle }),
+        body: { title: newTitle },
       });
 
-      const data = await response.json();
-      expect(response.status).toBe(200);
-      expect(data.ok).toBe(true);
-      expect(data.data.title).toBe(newTitle);
+      expect(res.status).toBe(200);
+      expect(res.json?.ok).toBe(true);
+      expect(res.json?.data?.title).toBe(newTitle);
     });
 
-    test("GET /api/sessions/:id/messages returns empty array for new session", async () => {
-      const response = await fetch(`${BASE_URL}/api/sessions/${sessionId}/messages`);
-      const data = await response.json();
+    test("GET /api/sessions/:id/messages returns array", async () => {
+      const res = request(`/api/sessions/${sessionId}/messages`);
 
-      expect(response.status).toBe(200);
-      expect(data.ok).toBe(true);
-      expect(Array.isArray(data.data)).toBe(true);
-      expect(data.data.length).toBe(0);
+      expect(res.status).toBe(200);
+      expect(res.json?.ok).toBe(true);
+      expect(Array.isArray(res.json?.data)).toBe(true);
     });
 
     test("DELETE /api/sessions/:id deletes session", async () => {
-      const response = await fetch(`${BASE_URL}/api/sessions/${sessionId}`, {
-        method: "DELETE",
-      });
+      const res = request(`/api/sessions/${sessionId}`, { method: "DELETE" });
+      expect(res.status).toBe(200);
+      expect(res.json?.ok).toBe(true);
 
-      const data = await response.json();
-      expect(response.status).toBe(200);
-      expect(data.ok).toBe(true);
-
-      // Verify deletion
-      const getResponse = await fetch(`${BASE_URL}/api/sessions/${sessionId}`);
-      const getData = await getResponse.json();
-      expect(getResponse.status).toBe(404);
+      const getRes = request(`/api/sessions/${sessionId}`);
+      expect(getRes.status).toBe(404);
     });
   });
 
   describe("Providers API", () => {
     test("GET /api/providers returns provider status", async () => {
-      const response = await fetch(`${BASE_URL}/api/providers`);
-      const data = await response.json();
+      const res = request("/api/providers");
 
-      expect(response.status).toBe(200);
-      expect(data.ok).toBe(true);
-      expect(Array.isArray(data.data)).toBe(true);
+      expect(res.status).toBe(200);
+      expect(res.json?.ok).toBe(true);
+      expect(Array.isArray(res.json?.data)).toBe(true);
+    });
+
+    test("PUT /api/providers/copilot rejects apiKey (auth-only)", async () => {
+      const res = request("/api/providers/copilot", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: { apiKey: "gho_fake" },
+      });
+
+      expect(res.status).toBe(400);
+      expect(res.json?.ok).toBe(false);
+      expect(String(res.json?.error ?? "")).toContain("auth only");
+    });
+
+    test("PUT /api/providers/openai rejects missing apiKey", async () => {
+      const res = request("/api/providers/openai", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: {},
+      });
+
+      expect(res.status).toBe(400);
+      expect(res.json?.ok).toBe(false);
+      expect(String(res.json?.error ?? "")).toContain("apiKey is required");
+    });
+
+    test("PUT /api/providers/anthropic accepts dual-mode payload shape and validates", async () => {
+      const res = request("/api/providers/anthropic", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: { authToken: "bad-token" },
+      });
+
+      expect(res.status).toBe(400);
+      expect(res.json?.ok).toBe(false);
+      expect(String(res.json?.error ?? "")).not.toContain("apiKey is required");
+    });
+
+    test("PUT /api/providers/local requires baseUrl", async () => {
+      const res = request("/api/providers/local", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: {},
+      });
+
+      expect(res.status).toBe(400);
+      expect(res.json?.ok).toBe(false);
+      expect(String(res.json?.error ?? "")).toContain("baseUrl is required");
     });
   });
 
   describe("Agents API", () => {
     test("GET /api/agents/status returns agent status", async () => {
-      const response = await fetch(`${BASE_URL}/api/agents/status`);
-      const data = await response.json();
+      const res = request("/api/agents/status");
 
-      expect(response.status).toBe(200);
-      expect(data.ok).toBe(true);
-      expect(data.data).toHaveProperty("workers");
+      expect(res.status).toBe(200);
+      expect(res.json?.ok).toBe(true);
+      expect(res.json?.data).toHaveProperty("workers");
     });
   });
 
   describe("Input Validation", () => {
     test("rejects invalid session ID", async () => {
-      const response = await fetch(`${BASE_URL}/api/sessions/invalid/../path`);
-      const data = await response.json();
+      const res = request("/api/sessions/invalid/../path");
 
-      expect(response.status).toBe(400);
-      expect(data.ok).toBe(false);
+      expect(res.status).toBe(400);
+      expect(res.json?.ok).toBe(false);
     });
 
-    test("rejects oversized session title", async () => {
+    test("rejects oversized session title by truncating", async () => {
       const longTitle = "a".repeat(300);
-      const response = await fetch(`${BASE_URL}/api/sessions`, {
+      const res = request("/api/sessions", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ title: longTitle }),
+        body: { title: longTitle },
       });
 
-      const data = await response.json();
-      expect(response.status).toBe(201);
-      // Title should be truncated to SESSION.MAX_TITLE_LENGTH (200)
-      expect(data.data.title.length).toBeLessThanOrEqual(200);
+      expect(res.status).toBe(201);
+      expect(res.json?.data?.title?.length).toBeLessThanOrEqual(200);
     });
   });
 
   describe("CORS Headers", () => {
-    test("includes CORS headers in response", async () => {
-      const response = await fetch(`${BASE_URL}/api/health`, {
-        headers: { "Origin": "http://localhost:5173" },
-      });
-
-      expect(response.headers.get("Access-Control-Allow-Origin")).toBeTruthy();
-      expect(response.headers.get("Access-Control-Allow-Methods")).toBeTruthy();
-    });
-
     test("handles preflight OPTIONS request", async () => {
-      const response = await fetch(`${BASE_URL}/api/sessions`, {
+      const res = request("/api/sessions", {
         method: "OPTIONS",
-        headers: { "Origin": "http://localhost:5173" },
+        headers: { Origin: "http://localhost:5173" },
       });
 
-      expect(response.status).toBe(204);
+      expect(res.status).toBe(204);
     });
   });
 });

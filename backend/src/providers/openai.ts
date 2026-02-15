@@ -9,10 +9,11 @@ import {
   type StreamRequest,
   type ProviderContentBlock,
   getModelsForProvider,
+  resolveModel,
 } from "./types";
 
 export class OpenAIProvider implements Provider {
-  private client: OpenAI;
+  protected client: OpenAI;
 
   constructor(
     readonly config: ProviderConfig,
@@ -20,7 +21,7 @@ export class OpenAIProvider implements Provider {
     baseUrl?: string,
   ) {
     this.client = new OpenAI({
-      apiKey: config.apiKey || "sk-placeholder-not-configured",
+      apiKey: config.apiKey,
       baseURL: baseUrl ?? config.baseUrl,
       defaultHeaders: config.headers,
     });
@@ -45,16 +46,22 @@ export class OpenAIProvider implements Provider {
       },
     }));
 
+    // Check if the specific model supports reasoning
+    const modelDef = resolveModel(request.model);
+    const canReason = modelDef?.canReason ?? false;
+
     const params: OpenAI.ChatCompletionCreateParamsStreaming = {
-      model: request.model,
+      model: modelDef?.apiModelId ?? request.model,
       messages,
       stream: true,
       stream_options: { include_usage: true },
       ...(request.maxTokens && { max_completion_tokens: request.maxTokens }),
       ...(request.temperature !== undefined && { temperature: request.temperature }),
       ...(tools?.length && { tools }),
-      // For reasoning models, set reasoning effort without restricting it
-      ...(request.reasoningEffort && { reasoning_effort: request.reasoningEffort }),
+      // Only send reasoning_effort if the model supports it
+      ...(canReason && request.reasoningLevel && ["low", "medium", "high"].includes(request.reasoningLevel) && { 
+        reasoning_effort: request.reasoningLevel as any 
+      }),
     };
 
     try {
@@ -142,7 +149,7 @@ export class OpenAIProvider implements Provider {
     }
   }
 
-  private convertMessages(request: StreamRequest): OpenAI.ChatCompletionMessageParam[] {
+  protected convertMessages(request: StreamRequest): OpenAI.ChatCompletionMessageParam[] {
     const result: OpenAI.ChatCompletionMessageParam[] = [];
 
     if (request.systemPrompt) {

@@ -2,13 +2,16 @@ import { sveltekit } from '@sveltejs/kit/vite';
 import tailwindcss from '@tailwindcss/vite';
 import { defineConfig } from 'vite';
 
+const backendHttp = process.env.KORY_BACKEND_URL ?? 'http://localhost:3000';
+const backendWs = backendHttp.replace(/^http/, 'ws');
+
 export default defineConfig({
 	plugins: [tailwindcss(), sveltekit()],
 	server: {
 		proxy: {
-			'/api': 'http://localhost:3000',
+			'/api': backendHttp,
 			'/ws': {
-				target: 'ws://localhost:3000',
+				target: backendWs,
 				ws: true,
 			},
 		},

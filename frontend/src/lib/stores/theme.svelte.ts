@@ -88,12 +88,14 @@ const FONT_FAMILIES: Record<FontFamily, string> = {
   jetbrains: "'JetBrains Mono', 'SF Mono', monospace",
 };
 
+import { browser } from '$app/environment';
+
 function createThemeStore() {
   const defaults: ThemeConfig = { preset: 'midnight', accent: 'indigo', font: 'inter' };
 
   // Load from localStorage
   let savedConfig: ThemeConfig = defaults;
-  if (typeof localStorage !== 'undefined') {
+  if (browser) {
     try {
       const stored = localStorage.getItem('koryphaios-theme');
       if (stored) savedConfig = { ...defaults, ...JSON.parse(stored) };
@@ -105,7 +107,7 @@ function createThemeStore() {
   let font = $state<FontFamily>(savedConfig.font);
 
   function applyToDOM() {
-    if (typeof document === 'undefined') return;
+    if (!browser) return;
 
     const resolvedPreset = resolvePreset(preset);
     const vars = THEME_PRESETS[resolvedPreset];
@@ -126,14 +128,14 @@ function createThemeStore() {
 
   function resolvePreset(p: ThemePreset): Exclude<ThemePreset, 'system'> {
     if (p !== 'system') return p;
-    if (typeof window !== 'undefined' && window.matchMedia('(prefers-color-scheme: light)').matches) {
+    if (browser && window.matchMedia('(prefers-color-scheme: light)').matches) {
       return 'light';
     }
     return 'midnight';
   }
 
   function save() {
-    if (typeof localStorage !== 'undefined') {
+    if (browser) {
       localStorage.setItem('koryphaios-theme', JSON.stringify({ preset, accent, font }));
     }
     applyToDOM();
@@ -180,8 +182,9 @@ function createThemeStore() {
     },
 
     init() {
+      if (!browser) return;
       applyToDOM();
-      if (typeof window !== 'undefined' && preset === 'system') {
+      if (preset === 'system') {
         window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
           if (preset === 'system') applyToDOM();
         });

@@ -91,16 +91,16 @@ export const FS = {
  */
 export const AGENT = {
   /** Default models per role if not configured */
-  DEFAULT_MANAGER_MODEL: "claude-sonnet-4-20250514",
-  DEFAULT_CODER_MODEL: "claude-sonnet-4-20250514",
+  DEFAULT_MANAGER_MODEL: "claude-sonnet-4-5",
+  DEFAULT_CODER_MODEL: "claude-sonnet-4-5",
   DEFAULT_TASK_MODEL: "o4-mini",
   
   /** Default token limits */
   DEFAULT_MAX_TOKENS: 8192,
   CODER_MAX_TOKENS: 16384,
   
-  /** Default reasoning effort */
-  DEFAULT_REASONING_EFFORT: "high" as const,
+  /** Default reasoning level */
+  DEFAULT_REASONING_LEVEL: "high" as const,
 } as const;
 
 /**

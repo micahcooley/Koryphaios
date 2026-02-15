@@ -3,6 +3,7 @@
 
 import type { Session } from '@koryphaios/shared';
 import { toastStore } from './toast.svelte';
+import { browser } from '$app/environment';
 
 let sessions = $state<Session[]>([]);
 let activeSessionId = $state<string>('');
@@ -12,10 +13,21 @@ let loading = $state<boolean>(false);
 // ─── API calls ──────────────────────────────────────────────────────────────
 
 async function fetchSessions() {
+  if (!browser) return;
+  
   try {
     const res = await fetch('/api/sessions');
     const data = await res.json();
-    if (data.ok) sessions = data.data;
+    if (data.ok) {
+      sessions = data.data;
+      // Auto-select first session if none active
+      if (!activeSessionId && sessions.length > 0) {
+        activeSessionId = sessions[0].id;
+      } else if (sessions.length === 0) {
+        // Create first session if none exist
+        void createSession();
+      }
+    }
   } catch (err) {
     toastStore.error('Failed to load sessions');
   }

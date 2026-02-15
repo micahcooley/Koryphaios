@@ -1,10 +1,11 @@
 <script lang="ts">
-  import { Send, ChevronDown, Brain, Sparkles } from 'lucide-svelte';
+  import { Send, ChevronDown, Sparkles } from 'lucide-svelte';
   import { wsStore } from '$lib/stores/websocket.svelte';
   import { getReasoningConfig, hasReasoningSupport, getDefaultReasoning } from '@koryphaios/shared';
+  import BrainIcon from '$lib/components/icons/BrainIcon.svelte';
 
   interface Props {
-    onSend: (message: string) => void;
+    onSend: (message: string, model?: string, reasoningLevel?: string) => void;
     inputRef?: HTMLTextAreaElement;
   }
 
@@ -14,37 +15,47 @@
   let selectedModel = $state<string>('auto');
   
   // Reasoning state - now tracks provider AND model
-  let reasoningEffort = $state('medium');
+  let reasoningLevel = $state('medium');
   let showReasoningMenu = $state(false);
 
-  // Extract provider and model from selection
-  let currentProvider = $derived(() => {
-    if (selectedModel === 'auto') return 'anthropic';
-    const parts = selectedModel.split(':');
-    return parts[0] || 'anthropic';
+  function parseModelSelection(value: string): { provider?: string; model?: string } {
+    if (value === 'auto') return {};
+    const separator = value.indexOf(':');
+    if (separator === -1) return {};
+    return {
+      provider: value.slice(0, separator),
+      model: value.slice(separator + 1),
+    };
+  }
+
+  let fallbackProvider = $derived(() => {
+    const preferred = wsStore.providers.find((p) => p.enabled && p.authenticated);
+    return preferred?.name ?? 'anthropic';
   });
 
-  let currentModel = $derived(() => {
-    if (selectedModel === 'auto') return undefined;
-    const parts = selectedModel.split(':');
-    return parts[1];
-  });
+  // Extract provider and model from selection. In auto mode, adapt to first available provider.
+  let currentProvider = $derived(() => parseModelSelection(selectedModel).provider ?? fallbackProvider());
+  let currentModel = $derived(() => parseModelSelection(selectedModel).model);
 
   // Get reasoning config based on provider + model
   let reasoningConfig = $derived(getReasoningConfig(currentProvider(), currentModel()));
   let reasoningSupported = $derived(hasReasoningSupport(currentProvider(), currentModel()));
 
-  // Update reasoning when model changes
+  // Update reasoning when model changes, but only if necessary
   $effect(() => {
     const config = getReasoningConfig(currentProvider(), currentModel());
     if (config) {
-      reasoningEffort = config.defaultValue;
+      // If current level isn't in new config options, reset to default
+      const exists = config.options.some(opt => opt.value === reasoningLevel);
+      if (!exists) {
+        reasoningLevel = config.defaultValue;
+      }
     }
   });
 
   let availableModels = $derived(() => {
-    const models: Array<{ label: string; value: string; provider: string }> = [
-      { label: 'Auto (Kory decides)', value: 'auto', provider: '' },
+    const models: Array<{ label: string; value: string; provider: string; isAuto?: boolean }> = [
+      { label: 'Auto (Kory decides)', value: 'auto', provider: '', isAuto: true },
     ];
     for (const p of wsStore.providers) {
       if (p.authenticated) {
@@ -54,6 +65,11 @@
       }
     }
     return models;
+  });
+
+  let selectedModelLabel = $derived(() => {
+    if (selectedModel === 'auto') return 'Auto';
+    return parseModelSelection(selectedModel).model ?? selectedModel;
   });
 
   function handleKeydown(e: KeyboardEvent) {
@@ -66,7 +82,7 @@
   function send() {
     const trimmed = input.trim();
     if (!trimmed) return;
-    onSend(trimmed);
+    onSend(trimmed, selectedModel, reasoningLevel);
     input = '';
     if (inputRef) inputRef.style.height = 'auto';
   }
@@ -84,18 +100,31 @@
   }
 
   function selectReasoning(value: string) {
-    reasoningEffort = value;
+    reasoningLevel = value;
     showReasoningMenu = false;
   }
 
-  function linesFor(value: string) {
-    switch (value) {
-      case 'low': return 1;
-      case 'medium': return 3;
-      case 'high': return 5;
-      default: return 3;
+  function reasoningLabel(value: string): string {
+    const config = getReasoningConfig(currentProvider(), currentModel());
+    if (config) {
+      const opt = config.options.find(o => o.value === value);
+      if (opt) return opt.label;
     }
+    return value;
   }
+
+  let modelDisplayName = $derived(() => {
+    const modelId = currentModel();
+    if (!modelId) return currentProvider().charAt(0).toUpperCase() + currentProvider().slice(1);
+    
+    // Try to find in wsStore models if they have names, otherwise clean up the ID
+    const provider = wsStore.providers.find(p => p.name === currentProvider());
+    if (provider) {
+      // If we had a model catalog on frontend we'd use it, for now prettify the ID
+      return modelId.split('-').map((word: string) => word.charAt(0).toUpperCase() + word.slice(1)).join(' ');
+    }
+    return modelId;
+  });
 
   function handleClickOutside(e: MouseEvent) {
     const target = e.target as HTMLElement;
@@ -112,12 +141,12 @@
     <!-- Model selector -->
     <div class="relative model-picker">
       <button
-        class="flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium transition-all hover:brightness-110 active:scale-[0.98]"
+        class="flex items-center gap-2 px-3 h-9 rounded-lg text-sm font-medium transition-all hover:brightness-110 active:scale-[0.98]"
         style="background: var(--color-surface-3); color: var(--color-text-primary); border: 1px solid var(--color-border);"
         onclick={() => showModelPicker = !showModelPicker}
       >
         <Sparkles size={16} class="text-amber-400" />
-        <span>{selectedModel === 'auto' ? 'Auto' : selectedModel.split(':').pop()}</span>
+        <span>{selectedModelLabel()}</span>
         <ChevronDown size={14} class="text-text-muted" />
       </button>
 
@@ -128,13 +157,16 @@
         >
           {#each availableModels() as model}
             <button
-              class="w-full text-left px-4 py-2.5 text-sm transition-colors hover:bg-[var(--color-surface-3)] {selectedModel === model.value ? 'text-[var(--color-accent)]' : ''}"
+              class="w-full text-left px-4 py-2.5 text-sm transition-colors hover:bg-[var(--color-surface-3)] flex items-center gap-2 {selectedModel === model.value ? 'text-[var(--color-accent)]' : ''}"
               style="color: {selectedModel === model.value ? 'var(--color-accent)' : 'var(--color-text-secondary)'};"
               onclick={() => selectModel(model.value)}
             >
+              {#if model.isAuto}
+                <Sparkles size={14} class="text-amber-400 shrink-0" />
+              {/if}
               <span>{model.label}</span>
               {#if model.provider}
-                <span class="text-xs ml-2 opacity-60" style="color: var(--color-text-muted);">({model.provider})</span>
+                <span class="text-xs ml-auto opacity-60" style="color: var(--color-text-muted);">({model.provider})</span>
               {/if}
             </button>
           {/each}
@@ -146,39 +178,44 @@
     {#if reasoningSupported && reasoningConfig}
       <div class="relative reasoning-picker">
         <button
-          class="flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-medium transition-all hover:brightness-110 active:scale-[0.98]"
+          class="flex items-center gap-2 px-3 h-9 rounded-lg text-sm font-medium transition-all hover:brightness-110 active:scale-[0.98]"
           style="background: var(--color-surface-3); color: var(--color-text-primary); border: 1px solid var(--color-border);"
           onclick={() => showReasoningMenu = !showReasoningMenu}
           title="Set reasoning effort"
         >
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" class="text-purple-400">
-            <circle cx="12" cy="12" r="7" />
-            {#each Array(linesFor(reasoningEffort)) as _, i}
-              <line x1="7.5" x2="16.5" y1={12 + (i - (linesFor(reasoningEffort)-1)/2)*2.6} y2={12 + (i - (linesFor(reasoningEffort)-1)/2)*2.6} />
-            {/each}
-          </svg>
-          <span class="capitalize">{reasoningEffort}</span>
+          <BrainIcon {reasoningLevel} size={20} class="text-[#c890ab]" />
+          <span>{reasoningLabel(reasoningLevel)}</span>
           <ChevronDown size={14} class="text-text-muted" />
         </button>
 
         {#if showReasoningMenu}
           <div
-            class="absolute bottom-full left-0 mb-2 w-64 rounded-lg border shadow-2xl z-50 overflow-hidden"
-            style="background: var(--color-surface-2); border-color: var(--color-border);"
+            class="absolute bottom-full left-0 mb-2 w-72 rounded-xl border shadow-2xl z-50 overflow-hidden backdrop-blur-md"
+            style="background: var(--color-surface-2-alpha, rgba(30, 30, 35, 0.9)); border-color: var(--color-border);"
           >
-            <div class="px-4 py-2.5 text-xs font-semibold uppercase tracking-wide" style="color: var(--color-text-muted); border-bottom: 1px solid var(--color-border);">
-              {currentModel() || currentProvider()} · Reasoning
+            <div class="px-4 py-3 text-xs font-bold uppercase tracking-widest opacity-70" style="color: var(--color-text-muted); border-bottom: 1px solid var(--color-border); background: rgba(255,255,255,0.03);">
+              {modelDisplayName()} · Reasoning
             </div>
-            {#each reasoningConfig.options as opt}
-              <button
-                class="w-full text-left px-4 py-2.5 text-sm transition-colors hover:bg-[var(--color-surface-3)] {reasoningEffort === opt.value ? 'text-[var(--color-accent)]' : ''}"
-                style="color: {reasoningEffort === opt.value ? 'var(--color-accent)' : 'var(--color-text-secondary)'};"
-                onclick={() => selectReasoning(opt.value)}
-              >
-                <span class="font-semibold">{opt.label}</span>
-                <span class="ml-2 opacity-70" style="color: var(--color-text-muted);">— {opt.description}</span>
-              </button>
-            {/each}
+            <div class="py-1">
+              {#each reasoningConfig.options as opt}
+                <button
+                  class="w-full text-left px-4 py-3 transition-all hover:bg-[var(--color-surface-3)] group"
+                  onclick={() => selectReasoning(opt.value)}
+                >
+                  <div class="flex items-center justify-between mb-0.5">
+                    <span class="text-sm font-semibold {reasoningLevel === opt.value ? 'text-[var(--color-accent)]' : 'text-[var(--color-text-primary)]'}">
+                      {opt.label}
+                    </span>
+                    {#if reasoningLevel === opt.value}
+                      <div class="w-1.5 h-1.5 rounded-full bg-[var(--color-accent)] shadow-[0_0_8px_var(--color-accent)]"></div>
+                    {/if}
+                  </div>
+                  <div class="text-[11px] leading-relaxed opacity-60 group-hover:opacity-100 transition-opacity" style="color: var(--color-text-muted);">
+                    {opt.description}
+                  </div>
+                </button>
+              {/each}
+            </div>
           </div>
         {/if}
       </div>
@@ -201,7 +238,7 @@
       onclick={send}
       disabled={!input.trim()}
       class="btn btn-primary self-end flex items-center justify-center gap-2"
-      style="min-width: 80px; height: 52px; padding: 0 20px; font-size: 14px; font-semibold;"
+      style="min-width: 80px; height: 52px; padding: 0 20px; font-size: 14px; font-weight: 600;"
     >
       <Send size={18} />
       Send

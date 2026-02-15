@@ -17,7 +17,7 @@
   --color-text-muted: #5a5a66;
 
   --color-glow-codex: rgba(0, 255, 255, 0.5);
-  --color-glow-gemini: rgba(128, 0, 128, 0.5);
+  --color-glow-google: rgba(66, 133, 244, 0.5);
   --color-glow-claude: rgba(255, 165, 0, 0.5);
   --color-glow-kory: rgba(255, 215, 0, 0.6);
   --color-glow-test: rgba(0, 255, 128, 0.5);
@@ -46,7 +46,7 @@
   --color-text-muted: #868e96;
   
   --color-glow-codex: rgba(0, 150, 200, 0.3);
-  --color-glow-gemini: rgba(128, 0, 128, 0.2);
+  --color-glow-google: rgba(66, 133, 244, 0.2);
   --color-glow-claude: rgba(255, 165, 0, 0.3);
   --color-glow-kory: rgba(255, 215, 0, 0.4);
   --color-glow-test: rgba(0, 180, 100, 0.3);
@@ -57,9 +57,9 @@
   border-color: rgba(0, 150, 200, 0.3);
 }
 
-:root[data-theme="light"] .glow-gemini {
-  box-shadow: 0 0 10px var(--color-glow-gemini);
-  border-color: rgba(128, 0, 128, 0.2);
+:root[data-theme="light"] .glow-google {
+  box-shadow: 0 0 10px var(--color-glow-google);
+  border-color: rgba(66, 133, 244, 0.2);
 }
 
 :root[data-theme="light"] .glow-claude {
@@ -91,6 +91,16 @@ body {
   color: var(--color-text-primary);
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+}
+
+/* Global focus management: Only show outlines when navigating via keyboard (tab) */
+:focus {
+  outline: none;
+}
+
+:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
 }
 
 /* Resizable Split Pane Layout */
@@ -190,9 +200,9 @@ body {
   border-color: rgba(0, 255, 255, 0.3);
 }
 
-.glow-gemini {
-  box-shadow: 0 0 15px var(--color-glow-gemini), 0 0 30px rgba(128, 0, 128, 0.15);
-  border-color: rgba(128, 0, 128, 0.3);
+.glow-google {
+  box-shadow: 0 0 15px var(--color-glow-google), 0 0 30px rgba(66, 133, 244, 0.15);
+  border-color: rgba(66, 133, 244, 0.3);
 }
 
 .glow-claude {
@@ -472,7 +482,8 @@ pre {
 
 /* Active session highlight fallback for environments where Tailwind arbitrary classes are not applied */
 .active-session {
-  background: var(--color-surface-3);
+  background: var(--color-surface-4);
+  border-left: 2px solid var(--color-accent);
 }
 
 /* Bring command input above the feed so it isn't covered by other layout elements */

@@ -121,11 +121,11 @@ Create or edit `koryphaios.json` in the project root:
   },
   "agents": {
     "manager": {
-      "model": "claude-sonnet-4-20250514",
+      "model": "claude-sonnet-4-5",
       "reasoningEffort": "high"
     },
     "coder": {
-      "model": "claude-sonnet-4-20250514",
+      "model": "claude-sonnet-4-5",
       "maxTokens": 16384
     },
     "task": {
@@ -187,8 +187,8 @@ bun run check
 
 #### Providers
 - `GET /api/providers` — Get provider status
-- `PUT /api/providers/:name` — Set API key for provider
-- `DELETE /api/providers/:name` — Remove API key
+- `PUT /api/providers/:name` — Set provider credentials (API key, auth token, and/or base URL depending on provider)
+- `DELETE /api/providers/:name` — Remove stored provider credentials
 
 #### Agents
 - `GET /api/agents/status` — Get active agent status

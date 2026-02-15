@@ -3,11 +3,11 @@
   "providers": {},
   "agents": {
     "manager": {
-      "model": "claude-sonnet-4-20250514",
-      "reasoningEffort": "high"
+      "model": "claude-sonnet-4-5",
+      "reasoningLevel": "high"
     },
     "coder": {
-      "model": "claude-sonnet-4-20250514",
+      "model": "claude-sonnet-4-5",
       "maxTokens": 16384
     },
     "task": {

@@ -30,10 +30,9 @@ export function validateConfig(config: Partial<KoryphaiosConfig>): void {
       if (agentConfig.maxTokens !== undefined && (typeof agentConfig.maxTokens !== "number" || agentConfig.maxTokens < 1)) {
         errors.push(`agents.${role}.maxTokens must be a positive number`);
       }
-      if ("reasoningEffort" in agentConfig && agentConfig.reasoningEffort !== undefined) {
-        const validEfforts = ["low", "medium", "high", "max"];
-        if (!validEfforts.includes(agentConfig.reasoningEffort as string)) {
-          errors.push(`agents.${role}.reasoningEffort must be one of: ${validEfforts.join(", ")}`);
+      if ("reasoningLevel" in agentConfig && agentConfig.reasoningLevel !== undefined) {
+        if (typeof agentConfig.reasoningLevel !== "string") {
+          errors.push(`agents.${role}.reasoningLevel must be a string`);
         }
       }
     }
@@ -42,7 +41,7 @@ export function validateConfig(config: Partial<KoryphaiosConfig>): void {
   // Validate providers config
   if (config.providers) {
     const validProviders = new Set([
-      "anthropic", "openai", "gemini", "copilot", "openrouter",
+      "anthropic", "openai", "gemini", "copilot", "codex", "openrouter",
       "groq", "xai", "azure", "bedrock", "vertexai", "local"
     ]);
 

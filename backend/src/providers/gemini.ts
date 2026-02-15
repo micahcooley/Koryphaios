@@ -1,4 +1,4 @@
-// Gemini provider — supports both API calls and gemini-cli child process wrapper.
+// Google provider — supports both API calls and google-cli child process wrapper.
 // Uses Google's GenAI SDK for direct API access.
 
 import type { ProviderConfig } from "@koryphaios/shared";
@@ -10,16 +10,18 @@ import {
 } from "./types";
 
 export class GeminiProvider implements Provider {
-  readonly name = "gemini" as const;
+  readonly name: "google" | "vertexai";
 
-  constructor(readonly config: ProviderConfig) {}
+  constructor(readonly config: ProviderConfig) {
+    this.name = (config.name === "vertexai" ? "vertexai" : "google") as any;
+  }
 
   isAvailable(): boolean {
     return !this.config.disabled && !!this.config.apiKey;
   }
 
   listModels() {
-    return getModelsForProvider("gemini");
+    return getModelsForProvider(this.name);
   }
 
   async *streamResponse(request: StreamRequest): AsyncGenerator<ProviderEvent> {
@@ -42,22 +44,41 @@ export class GeminiProvider implements Provider {
         parts: typeof m.content === "string"
           ? [{ text: m.content }]
           : (m.content as any[]).map((b: any) => {
-              if (b.type === "text") return { text: b.text ?? "" };
-              if (b.type === "tool_result") return { text: b.toolOutput ?? "" };
-              return { text: "" };
-            }),
+            if (b.type === "text") return { text: b.text ?? "" };
+            if (b.type === "tool_result") return { text: b.toolOutput ?? "" };
+            return { text: "" };
+          }),
       }));
+
+    const generationConfig: any = {
+      systemInstruction: request.systemPrompt,
+      maxOutputTokens: request.maxTokens ?? 65_536,
+      temperature: request.temperature,
+      tools: tools as any,
+    };
+
+    // Support thinking for Gemini 2.0+
+    if (request.reasoningLevel && request.reasoningLevel !== "0") {
+      let thinkingBudget = 8192;
+      if (request.reasoningLevel === "low") thinkingBudget = 1024;
+      else if (request.reasoningLevel === "medium") thinkingBudget = 8192;
+      else if (request.reasoningLevel === "high") thinkingBudget = 24576;
+      else if (!isNaN(Number(request.reasoningLevel))) thinkingBudget = Number(request.reasoningLevel);
+
+      generationConfig.thinkingConfig = {
+        includeThoughts: true,
+        thinkingBudgetTokens: thinkingBudget,
+      };
+      // Total maxOutputTokens must include thinking budget if model requires it
+      // For Gemini, maxOutputTokens is usually for the final response, but let's be safe
+      generationConfig.maxOutputTokens = (generationConfig.maxOutputTokens ?? 65536) + thinkingBudget;
+    }
 
     try {
       const response = await client.models.generateContentStream({
         model: request.model,
         contents,
-        config: {
-          systemInstruction: request.systemPrompt,
-          maxOutputTokens: request.maxTokens ?? 65_536,
-          temperature: request.temperature,
-          tools: tools as any,
-        },
+        config: generationConfig,
       });
 
       for await (const chunk of response) {
@@ -73,10 +94,11 @@ export class GeminiProvider implements Provider {
           }
           if ((part as any).functionCall) {
             const fc = (part as any).functionCall;
-            yield { type: "tool_use_start", toolCallId: fc.name, toolName: fc.name };
+            const callId = crypto.randomUUID();
+            yield { type: "tool_use_start", toolCallId: callId, toolName: fc.name };
             yield {
               type: "tool_use_stop",
-              toolCallId: fc.name,
+              toolCallId: callId,
               toolName: fc.name,
               toolInput: JSON.stringify(fc.args ?? {}),
             };
@@ -110,16 +132,23 @@ export class GeminiProvider implements Provider {
 // Used for authenticated Gemini access via Google Cloud CLI auth.
 
 export class GeminiCLIProvider implements Provider {
-  readonly name = "gemini" as const;
+  readonly name = "google" as const;
+  private cliAvailable: boolean | null = null;
 
-  constructor(readonly config: ProviderConfig) {}
+  constructor(readonly config: ProviderConfig) { }
 
   isAvailable(): boolean {
-    return !this.config.disabled;
+    if (this.config.disabled) return false;
+    if (this.config.authToken?.startsWith("cli:")) return true;
+    if (this.cliAvailable === null) {
+      const proc = Bun.spawnSync(["which", "gemini"], { stdout: "pipe", stderr: "pipe" });
+      this.cliAvailable = proc.exitCode === 0;
+    }
+    return this.cliAvailable;
   }
 
   listModels() {
-    return getModelsForProvider("gemini");
+    return getModelsForProvider("google");
   }
 
   async *streamResponse(request: StreamRequest): AsyncGenerator<ProviderEvent> {

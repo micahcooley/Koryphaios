@@ -5,8 +5,9 @@
 export const ProviderName = {
   Anthropic: "anthropic",
   OpenAI: "openai",
-  Gemini: "gemini",
+  Google: "google",
   Copilot: "copilot",
+  Codex: "codex",
   OpenRouter: "openrouter",
   Groq: "groq",
   XAI: "xai",
@@ -22,6 +23,8 @@ export interface ModelDef {
   id: string;
   name: string;
   provider: ProviderName;
+  /** Model ID sent to the API. Defaults to `id` if omitted. Used when API expects a different name (e.g., OpenRouter "openai/gpt-4.1"). */
+  apiModelId?: string;
   contextWindow: number;
   maxOutputTokens: number;
   costPerMInputTokens: number;
@@ -37,17 +40,20 @@ export interface ProviderConfig {
   authToken?: string;
   baseUrl?: string;
   disabled: boolean;
-  models?: string[];
+  /** List of model IDs enabled by the user. If empty or undefined, all are enabled. */
+  selectedModels?: string[];
+  /** Whether to skip the model selection dialog in the future. */
+  hideModelSelector?: boolean;
   headers?: Record<string, string>;
 }
 
-export type ProviderAuthMode = "api_key" | "auth_only" | "api_key_or_auth" | "base_url_only";
+export type ProviderAuthMode = "api_key" | "auth_only" | "api_key_or_auth" | "base_url_only" | "env_auth";
 
 // ─── Agent & Worker Types ───────────────────────────────────────────────────
 
 export type AgentRole = "manager" | "coder" | "task" | "reviewer" | "title" | "summarizer";
 
-export type AgentStatus = "idle" | "thinking" | "tool_calling" | "streaming" | "verifying" | "error" | "done";
+export type AgentStatus = "idle" | "thinking" | "tool_calling" | "streaming" | "verifying" | "compacting" | "waiting_user" | "error" | "done" | "reading" | "writing";
 
 export type WorkerDomain = "ui" | "backend" | "general" | "review" | "test";
 
@@ -273,10 +279,16 @@ export interface ProviderStatusPayload {
     enabled: boolean;
     authenticated: boolean;
     models: string[];
+    /** All possible models for this provider, even if not selected. */
+    allAvailableModels: string[];
+    /** The IDs of models currently selected/enabled by the user. */
+    selectedModels: string[];
+    hideModelSelector: boolean;
     authMode: ProviderAuthMode;
     supportsApiKey: boolean;
     supportsAuthToken: boolean;
     requiresBaseUrl: boolean;
+    extraAuthModes?: Array<{ id: string; label: string; description: string }>;
     error?: string;
   }>;
 }
@@ -286,8 +298,8 @@ export interface ProviderStatusPayload {
 export interface KoryphaiosConfig {
   providers: Record<string, ProviderConfig>;
   agents: {
-    manager: { model: string; maxTokens?: number; reasoningEffort?: "low" | "medium" | "high" };
-    coder: { model: string; maxTokens?: number; reasoningEffort?: "low" | "medium" | "high" };
+    manager: { model: string; maxTokens?: number; reasoningLevel?: string };
+    coder: { model: string; maxTokens?: number; reasoningLevel?: string };
     task: { model: string; maxTokens?: number };
   };
   mcpServers?: Record<string, MCPServerConfig>;
@@ -327,6 +339,7 @@ export interface SendMessageRequest {
   content: string;
   attachments?: Array<{ type: "image" | "file"; data: string; name: string }>;
   model?: string;
+  reasoningLevel?: string;
 }
 
 export interface CreateSessionRequest {
@@ -352,10 +365,10 @@ export const PROVIDER_REASONING: Record<string, ReasoningConfig | null> = {
   anthropic: {
     parameter: 'effort',
     options: [
-      { value: 'low', label: 'Low', description: 'Faster, less thorough' },
-      { value: 'medium', label: 'Medium', description: 'Balanced' },
-      { value: 'high', label: 'High', description: 'Best quality (default)' },
-      { value: 'max', label: 'Max', description: 'Maximum reasoning' },
+      { value: 'low', label: 'Low', description: 'Fast responses with basic reasoning' },
+      { value: 'medium', label: 'Medium', description: 'Balanced depth and speed' },
+      { value: 'high', label: 'High', description: 'Thorough reasoning for complex tasks' },
+      { value: 'max', label: 'xhigh', description: 'Deepest possible thinking budget' },
     ],
     defaultValue: 'high',
     supportsModelSpecific: false,
@@ -367,22 +380,22 @@ export const PROVIDER_REASONING: Record<string, ReasoningConfig | null> = {
   openai: {
     parameter: 'reasoning.effort',
     options: [
-      { value: 'low', label: 'Low', description: 'Less reasoning effort' },
-      { value: 'medium', label: 'Medium', description: 'Balanced (default)' },
-      { value: 'high', label: 'High', description: 'More reasoning effort' },
+      { value: 'low', label: 'Low', description: 'Quick thinking for simple logic' },
+      { value: 'medium', label: 'Medium', description: 'Standard reasoning effort' },
+      { value: 'high', label: 'High', description: 'Maximum reasoning intensity' },
     ],
     defaultValue: 'medium',
     supportsModelSpecific: true,
   },
 
-  // Google Gemini - thinkingBudget tokens or thinkingLevel
-  gemini: {
+  // Google - thinkingBudget tokens or thinkingLevel
+  google: {
     parameter: 'thinkingConfig.thinkingBudget',
     options: [
-      { value: '0', label: 'Off', description: 'No thinking' },
-      { value: '1024', label: 'Low', description: '~1K tokens' },
-      { value: '8192', label: 'Medium', description: '~8K tokens' },
-      { value: '24576', label: 'High', description: '~24K tokens' },
+      { value: '0', label: 'Off', description: 'Standard generation without thinking' },
+      { value: '1024', label: 'Low', description: 'Minimal thinking budget (~1k tokens)' },
+      { value: '8192', label: 'Medium', description: 'Balanced thinking budget (~8k tokens)' },
+      { value: '24576', label: 'High', description: 'Deep thinking budget (~24k tokens)' },
     ],
     defaultValue: '8192',
     supportsModelSpecific: false,
@@ -440,59 +453,71 @@ export const MODEL_REASONING_OVERRIDES: Array<{
   options: { value: string; label: string; description: string }[];
   defaultValue: string;
 }> = [
-  // OpenAI GPT-5 series - supports xhigh
-  { pattern: /^gpt-5/, provider: 'openai', options: [
-    { value: 'none', label: 'None', description: 'No explicit reasoning' },
-    { value: 'minimal', label: 'Minimal', description: 'Minimal effort' },
-    { value: 'low', label: 'Low', description: 'Low effort' },
-    { value: 'medium', label: 'Medium', description: 'Balanced' },
-    { value: 'high', label: 'High', description: 'High effort' },
-    { value: 'xhigh', label: 'X-High', description: 'Maximum effort' },
-  ], defaultValue: 'high' },
+    // OpenAI GPT-5 series - supports xhigh
+    {
+      pattern: /^gpt-5/, provider: 'openai', options: [
+        { value: 'none', label: 'None', description: 'No explicit reasoning' },
+        { value: 'minimal', label: 'Minimal', description: 'Minimal effort' },
+        { value: 'low', label: 'Low', description: 'Low effort' },
+        { value: 'medium', label: 'Medium', description: 'Balanced' },
+        { value: 'high', label: 'High', description: 'High effort' },
+        { value: 'xhigh', label: 'xhigh', description: 'Maximum effort' },
+      ], defaultValue: 'high'
+    },
 
-  // OpenAI o1-mini - NO reasoning_effort (not supported)
-  { pattern: /^o1-mini/, provider: 'openai', options: [], defaultValue: '' },
+    // OpenAI o1-mini - NO reasoning_effort (not supported)
+    { pattern: /^o1-mini/, provider: 'openai', options: [], defaultValue: '' },
 
-  // OpenAI o1/o3/o4 series - supports low/medium/high
-  { pattern: /^(o1|o3|o4)/, provider: 'openai', options: [
-    { value: 'low', label: 'Low', description: 'Less reasoning' },
-    { value: 'medium', label: 'Medium', description: 'Balanced (default)' },
-    { value: 'high', label: 'High', description: 'More reasoning' },
-  ], defaultValue: 'medium' },
+    // OpenAI o1/o3/o4 series - supports low/medium/high
+    {
+      pattern: /^(o1|o3|o4)/, provider: 'openai', options: [
+        { value: 'low', label: 'Low', description: 'Less reasoning' },
+        { value: 'medium', label: 'Medium', description: 'Balanced (default)' },
+        { value: 'high', label: 'High', description: 'More reasoning' },
+      ], defaultValue: 'medium'
+    },
 
-  // Groq Qwen models - only none/default
-  { pattern: /^qwen/, provider: 'groq', options: [
-    { value: 'none', label: 'None', description: 'Disable reasoning' },
-    { value: 'default', label: 'Default', description: 'Enable reasoning' },
-  ], defaultValue: 'default' },
+    // Groq Qwen models - only none/default
+    {
+      pattern: /^qwen/, provider: 'groq', options: [
+        { value: 'none', label: 'None', description: 'Disable reasoning' },
+        { value: 'default', label: 'Default', description: 'Enable reasoning' },
+      ], defaultValue: 'default'
+    },
 
-  // Groq GPT-OSS models - low/medium/high
-  { pattern: /^gpt-oss/, provider: 'groq', options: [
-    { value: 'low', label: 'Low', description: 'Low effort' },
-    { value: 'medium', label: 'Medium', description: 'Balanced (default)' },
-    { value: 'high', label: 'High', description: 'High effort' },
-  ], defaultValue: 'medium' },
+    // Groq GPT-OSS models - low/medium/high
+    {
+      pattern: /^gpt-oss/, provider: 'groq', options: [
+        { value: 'low', label: 'Low', description: 'Low effort' },
+        { value: 'medium', label: 'Medium', description: 'Balanced (default)' },
+        { value: 'high', label: 'High', description: 'High effort' },
+      ], defaultValue: 'medium'
+    },
 
-  // Gemini 2.5/3 - thinkingLevel option
-  { pattern: /^(gemini-2\.5|gemini-3)/, provider: 'gemini', options: [
-    { value: '0', label: 'Off', description: 'No thinking' },
-    { value: 'low', label: 'Low', description: 'Low thinking' },
-    { value: 'high', label: 'High', description: 'High thinking' },
-  ], defaultValue: 'high' },
-];
+    // Gemini 2.5/3 - thinkingLevel option
+    {
+      pattern: /^(gemini-2\.5|gemini-3)/, provider: 'google', options: [
+        { value: '0', label: 'Off', description: 'No thinking' },
+        { value: 'low', label: 'Low', description: 'Low thinking' },
+        { value: 'high', label: 'High', description: 'High thinking' },
+      ], defaultValue: 'high'
+    },
+  ];
 
-export function getReasoningConfig(provider: string, model?: string): ReasoningConfig | null {
+export function getReasoningConfig(provider?: string, model?: string): ReasoningConfig | null {
+  if (!provider) return PROVIDER_REASONING.anthropic; // Default to anthropic for 'auto' or missing provider
+
   const providerConfig = PROVIDER_REASONING[provider];
   if (!providerConfig) return null;
-  
+
   // If no model specified or provider doesn't have model-specific options
   if (!model || !providerConfig.supportsModelSpecific) {
     return providerConfig;
   }
-  
+
   // Check for model-specific overrides
   for (const override of MODEL_REASONING_OVERRIDES) {
-    if (override.pattern.test(model) && override.provider === provider) {
+    if (override.pattern.test(model) && (override.provider === provider)) {
       if (override.options.length === 0) {
         return null; // Model doesn't support reasoning (e.g., o1-mini)
       }
@@ -503,16 +528,16 @@ export function getReasoningConfig(provider: string, model?: string): ReasoningC
       };
     }
   }
-  
+
   return providerConfig;
 }
 
-export function hasReasoningSupport(provider: string, model?: string): boolean {
+export function hasReasoningSupport(provider?: string, model?: string): boolean {
   const config = getReasoningConfig(provider, model);
-  return config !== null && config.options.length > 0;
+  return config !== null && config.options && config.options.length > 0;
 }
 
-export function getDefaultReasoning(provider: string, model?: string): string {
+export function getDefaultReasoning(provider?: string, model?: string): string {
   const config = getReasoningConfig(provider, model);
   return config?.defaultValue ?? 'medium';
 }

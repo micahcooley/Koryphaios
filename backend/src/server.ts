@@ -3,6 +3,7 @@
 
 import type { WSMessage, KoryphaiosConfig, APIResponse, SendMessageRequest, CreateSessionRequest, Session } from "@koryphaios/shared";
 import { ProviderRegistry } from "./providers";
+import { startCopilotDeviceAuth, pollCopilotDeviceAuth } from "./providers/copilot";
 import { ToolRegistry, BashTool, ReadFileTool, WriteFileTool, EditFileTool, GrepTool, GlobTool, LsTool, WebSearchTool, WebFetchTool, DeleteFileTool, MoveFileTool, DiffTool, PatchTool } from "./tools";
 import { KoryManager } from "./kory/manager";
 import { TelegramBridge } from "./telegram/bot";
@@ -48,7 +49,7 @@ function loadConfig(): KoryphaiosConfig {
   const config: KoryphaiosConfig = {
     providers: fileConfig.providers ?? {},
     agents: fileConfig.agents ?? {
-      manager: { model: AGENT.DEFAULT_MANAGER_MODEL, reasoningEffort: AGENT.DEFAULT_REASONING_EFFORT },
+      manager: { model: AGENT.DEFAULT_MANAGER_MODEL, reasoningLevel: AGENT.DEFAULT_REASONING_LEVEL },
       coder: { model: AGENT.DEFAULT_CODER_MODEL, maxTokens: AGENT.CODER_MAX_TOKENS },
       task: { model: AGENT.DEFAULT_TASK_MODEL, maxTokens: AGENT.DEFAULT_MAX_TOKENS },
     },
@@ -101,6 +102,28 @@ function persistEnvVar(key: string, value: string) {
     serverLog.debug({ key }, "Persisted environment variable");
   } catch (err) {
     serverLog.error({ key, error: String(err) }, "Failed to persist environment variable");
+  }
+}
+
+function clearEnvVar(key: string) {
+  const envPath = join(process.cwd(), ".env");
+  let content = "";
+  try {
+    content = readFileSync(envPath, "utf-8");
+  } catch {
+    delete process.env[key];
+    return;
+  }
+
+  delete process.env[key];
+  const lines = content
+    .split("\n")
+    .filter((line) => !line.startsWith(`${key}=`));
+  try {
+    writeFileSync(envPath, lines.join("\n"));
+    serverLog.debug({ key }, "Cleared environment variable");
+  } catch (err) {
+    serverLog.error({ key, error: String(err) }, "Failed to clear environment variable");
   }
 }
 
@@ -239,9 +262,14 @@ class MessageStore {
     }
   }
 
+  getRecent(sessionId: string, limit: number = 10): StoredMessage[] {
+    const all = this.getAll(sessionId);
+    return all.slice(-limit);
+  }
+
   private saveToDisk(sessionId: string, messages: StoredMessage[]): void {
     try {
-      writeFileSync(join(this.dataDir, `${sessionId}${FS.MESSAGES_FILE_SUFFIX}`), JSON.stringify(messages));
+      writeFileSync(join(this.dataDir, `${sessionId}${FS.MESSAGES_FILE_SUFFIX}`), JSON.stringify(messages, null, 2));
     } catch (err) {
       serverLog.error({ sessionId, error: String(err) }, "Failed to save messages to disk");
     }
@@ -370,12 +398,12 @@ async function main() {
     serverLog.info({ count: mcpManager.getStatus().length }, "MCP servers connected");
   }
 
-  // Initialize Kory
-  const kory = new KoryManager(providers, tools, process.cwd());
-
   // Initialize sessions
   const sessions = new SessionStore(dataDir);
   const messages = new MessageStore(dataDir);
+
+  // Initialize Kory
+  const kory = new KoryManager(providers, tools, process.cwd(), sessions, messages);
 
   // Initialize WebSocket manager
   const wsManager = new WSManager();
@@ -454,6 +482,13 @@ async function main() {
       }
 
       // ── REST API Routes ──
+
+      // Agent steering
+      if (url.pathname.startsWith("/api/agents/") && url.pathname.endsWith("/cancel") && method === "POST") {
+        const agentId = url.pathname.replace("/api/agents/", "").replace("/cancel", "");
+        kory.cancelWorker(agentId);
+        return json({ ok: true }, 200, corsHeaders);
+      }
 
       // Sessions
       if (url.pathname === "/api/sessions" && method === "GET") {
@@ -586,15 +621,19 @@ async function main() {
         }
 
         // Process async — results stream via WebSocket
-        kory.processTask(activeSessionId, content).catch((err) => {
-          serverLog.error(err, "Error processing request");
-          wsManager.broadcast({
-            type: "system.error",
-            payload: { error: err.message },
-            timestamp: Date.now(),
-            sessionId: activeSessionId,
+        kory.processTask(activeSessionId, content, body.model, body.reasoningLevel)
+          .then(() => {
+            serverLog.debug({ sessionId: activeSessionId }, "Task completed successfully");
+          })
+          .catch((err) => {
+            serverLog.error({ sessionId: activeSessionId, error: err }, "Error processing request");
+            wsManager.broadcast({
+              type: "system.error",
+              payload: { error: err.message },
+              timestamp: Date.now(),
+              sessionId: activeSessionId,
+            });
           });
-        });
 
         return json({ ok: true, data: { sessionId: activeSessionId, status: "processing" } }, 202, corsHeaders);
       }
@@ -604,7 +643,61 @@ async function main() {
         return json({ ok: true, data: providers.getStatus() }, 200, corsHeaders);
       }
 
-      // Set provider API key
+      // Start Copilot browser device auth flow
+      if (url.pathname === "/api/providers/copilot/device/start" && method === "POST") {
+        try {
+          const start = await startCopilotDeviceAuth();
+          return json({ ok: true, data: start }, 200, corsHeaders);
+        } catch (err: any) {
+          return json({ ok: false, error: err.message ?? "Failed to start Copilot auth" }, 400, corsHeaders);
+        }
+      }
+
+      // Poll Copilot device auth and finalize connection
+      if (url.pathname === "/api/providers/copilot/device/poll" && method === "POST") {
+        const body = await req.json() as { deviceCode?: string };
+        const deviceCode = sanitizeString(body.deviceCode, 300);
+        if (!deviceCode) {
+          return json({ ok: false, error: "deviceCode is required" }, 400, corsHeaders);
+        }
+
+        try {
+          const poll = await pollCopilotDeviceAuth(deviceCode);
+          if (poll.error) {
+            // Standard pending/slow_down/expired_token responses
+            return json({ ok: true, data: { status: poll.error, description: poll.errorDescription } }, 200, corsHeaders);
+          }
+          if (!poll.accessToken) {
+            return json({ ok: false, error: "No access token returned from GitHub" }, 400, corsHeaders);
+          }
+
+          const result = providers.setCredentials("copilot", { authToken: poll.accessToken });
+          if (!result.success) {
+            return json({ ok: false, error: result.error }, 400, corsHeaders);
+          }
+
+          const verification = await providers.verifyConnection("copilot", { authToken: poll.accessToken });
+          if (!verification.success) {
+            providers.removeApiKey("copilot");
+            return json({ ok: false, error: verification.error ?? "Copilot verification failed" }, 400, corsHeaders);
+          }
+
+          persistEnvVar(providers.getExpectedEnvVar("copilot", "authToken"), encryptApiKey(poll.accessToken));
+          providers.refreshProvider("copilot");
+
+          wsManager.broadcast({
+            type: "provider.status",
+            payload: { providers: providers.getStatus() },
+            timestamp: Date.now(),
+          } satisfies WSMessage);
+
+          return json({ ok: true, data: { status: "connected" } }, 200, corsHeaders);
+        } catch (err: any) {
+          return json({ ok: false, error: err.message ?? "Failed to complete Copilot auth" }, 400, corsHeaders);
+        }
+      }
+
+      // Set provider credentials
       if (url.pathname.startsWith("/api/providers/") && method === "PUT") {
         const rawName = url.pathname.split("/")[3];
         const providerName = validateProviderName(rawName);
@@ -612,28 +705,88 @@ async function main() {
           return json({ ok: false, error: "Invalid provider name" }, 400, corsHeaders);
         }
 
-        const body = await req.json() as { apiKey?: string; baseUrl?: string };
+        const body = await req.json() as { apiKey?: string; authToken?: string; baseUrl?: string; selectedModels?: string[]; hideModelSelector?: boolean; authMode?: string };
         const apiKey = sanitizeString(body.apiKey, 500);
+        const authToken = sanitizeString(body.authToken, 1000);
+        const baseUrl = sanitizeString(body.baseUrl, 500);
+        const authMode = sanitizeString(body.authMode, 50);
 
-        if (!apiKey) {
-          return json({ ok: false, error: "apiKey is required" }, 400, corsHeaders);
-        }
+        // Handle special CLI auth modes (codex, gemini cli, claude code)
+        if (authMode === "codex" || authMode === "cli" || authMode === "claude_code") {
+          const cliName = authMode === "codex" ? "codex" : authMode === "cli" ? "gemini" : "claude";
+          const targetProvider = authMode === "codex" ? "codex" : authMode === "cli" ? "gemini" : "anthropic";
 
-        const result = providers.setApiKey(providerName as any, apiKey, body.baseUrl);
-        if (result.success) {
-          // Persist encrypted key to .env file
-          persistEnvVar(providers.getExpectedEnvVar(providerName as any), encryptApiKey(apiKey));
+          // Verify CLI is installed and accessible
+          const whichProc = Bun.spawnSync(["which", cliName], { stdout: "pipe", stderr: "pipe" });
+          if (whichProc.exitCode !== 0) {
+            return json({ ok: false, error: `${cliName} CLI not found in PATH. Install it first.` }, 400, corsHeaders);
+          }
 
-          // Broadcast updated provider status via WebSocket
+          // Verify CLI auth by running a lightweight command
+          const verifyProc = Bun.spawnSync([cliName, "--version"], { stdout: "pipe", stderr: "pipe", timeout: 10_000 });
+          if (verifyProc.exitCode !== 0) {
+            const stderr = verifyProc.stderr ? new TextDecoder().decode(verifyProc.stderr).trim() : "";
+            return json({ ok: false, error: `${cliName} CLI check failed: ${stderr || `exit code ${verifyProc.exitCode}`}` }, 400, corsHeaders);
+          }
+
+          // Mark provider as CLI-authenticated
+          const result = providers.setCredentials(targetProvider as any, {
+            authToken: `cli:${cliName}`,
+          });
+          if (!result.success) {
+            return json({ ok: false, error: result.error }, 400, corsHeaders);
+          }
+
+          persistEnvVar(providers.getExpectedEnvVar(targetProvider as any, "authToken"), `cli:${cliName}`);
+
           wsManager.broadcast({
             type: "provider.status",
             payload: { providers: providers.getStatus() },
             timestamp: Date.now(),
           } satisfies WSMessage);
 
-          return json({ ok: true, data: { provider: providerName, status: "connected" } }, 200, corsHeaders);
+          return json({ ok: true, data: { provider: targetProvider, status: "connected", authMode } }, 200, corsHeaders);
         }
-        return json({ ok: false, error: result.error }, 400, corsHeaders);
+
+        const result = providers.setCredentials(providerName as any, {
+          ...(apiKey && { apiKey }),
+          ...(authToken && { authToken }),
+          ...(baseUrl && { baseUrl }),
+          ...(body.selectedModels && { selectedModels: body.selectedModels }),
+          ...(body.hideModelSelector !== undefined && { hideModelSelector: body.hideModelSelector }),
+        });
+        if (!result.success) {
+          return json({ ok: false, error: result.error }, 400, corsHeaders);
+        }
+
+        const verification = await providers.verifyConnection(providerName as any, {
+          ...(apiKey && { apiKey }),
+          ...(authToken && { authToken }),
+          ...(baseUrl && { baseUrl }),
+        });
+        if (!verification.success) {
+          providers.removeApiKey(providerName as any);
+          return json({ ok: false, error: verification.error ?? "Provider verification failed" }, 400, corsHeaders);
+        }
+
+        if (apiKey) {
+          persistEnvVar(providers.getExpectedEnvVar(providerName as any, "apiKey"), encryptApiKey(apiKey));
+        }
+        if (authToken) {
+          persistEnvVar(providers.getExpectedEnvVar(providerName as any, "authToken"), encryptApiKey(authToken));
+        }
+        if (baseUrl) {
+          persistEnvVar(providers.getExpectedEnvVar(providerName as any, "baseUrl"), baseUrl);
+        }
+
+        // Broadcast updated provider status via WebSocket
+        wsManager.broadcast({
+          type: "provider.status",
+          payload: { providers: providers.getStatus() },
+          timestamp: Date.now(),
+        } satisfies WSMessage);
+
+        return json({ ok: true, data: { provider: providerName, status: "connected" } }, 200, corsHeaders);
       }
 
       // Remove provider API key
@@ -644,6 +797,9 @@ async function main() {
           return json({ ok: false, error: "Invalid provider name" }, 400, corsHeaders);
         }
         providers.removeApiKey(providerName as any);
+        clearEnvVar(providers.getExpectedEnvVar(providerName as any, "apiKey"));
+        clearEnvVar(providers.getExpectedEnvVar(providerName as any, "authToken"));
+        clearEnvVar(providers.getExpectedEnvVar(providerName as any, "baseUrl"));
 
         wsManager.broadcast({
           type: "provider.status",
