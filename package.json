@@ -8,6 +8,7 @@
     "dev:backend": "bun run --filter backend dev",
     "dev:frontend": "bun run --filter frontend dev",
     "build": "bun run --filter '*' build",
-    "typecheck": "bun run --filter '*' typecheck"
+    "typecheck": "bun run --filter '*' typecheck",
+    "check": "bun run --filter backend typecheck && bun run --filter frontend check:strict"
   }
 }

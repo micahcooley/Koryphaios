@@ -1,65 +1,57 @@
 <script lang="ts">
   import { wsStore } from "$lib/stores/websocket.svelte";
+  import { AlertTriangle, X, Check, Shield, ShieldAlert, ShieldCheck, ArrowRight } from "lucide-svelte";
 
-  // Permission requests from agents
-  let pendingPermissions = $state<Array<{
-    id: string;
-    agentId: string;
-    agentName: string;
-    toolName: string;
-    description: string;
-    risk: "low" | "medium" | "high";
-    timestamp: number;
-  }>>([]);
-
-  // For demo / incoming permissions from WS
-  $effect(() => {
-    // In production, permission requests come via WebSocket
-    // Currently stubbed — will be wired when tool permission system is integrated
-  });
-
-  function riskColor(risk: "low" | "medium" | "high"): string {
+  function getRiskColor(risk: string): string {
     switch (risk) {
       case "low": return "text-green-400";
       case "medium": return "text-yellow-400";
       case "high": return "text-red-400";
+      default: return "text-text-muted";
     }
   }
 
-  function riskBorder(risk: "low" | "medium" | "high"): string {
+  function getRiskBorder(risk: string): string {
     switch (risk) {
       case "low": return "border-green-500/30";
       case "medium": return "border-yellow-500/30";
       case "high": return "border-red-500/30";
+      default: return "border-border";
     }
   }
 
-  function approve(id: string) {
-    // Send approval via WS
-    if (wsStore.connection?.readyState === 1) {
-      wsStore.connection.send(JSON.stringify({
-        type: "permission.response",
-        id,
-        approved: true,
-      }));
+  function getRiskIcon(risk: string) {
+    switch (risk) {
+      case "low": return ShieldCheck;
+      case "medium": return ShieldAlert;
+      case "high": return Shield;
+      default: return Shield;
     }
-    pendingPermissions = pendingPermissions.filter((p) => p.id !== id);
+  }
+
+  function determineRiskLevel(toolName: string): "low" | "medium" | "high" {
+    const highRisk = ['bash', 'write_file', 'edit_file', 'delete_file', 'move_file', 'patch', 'run'];
+    const mediumRisk = ['read_file', 'grep', 'glob', 'web_fetch', 'diff'];
+    const lowRisk = ['ls', 'glob', 'search'];
+    
+    if (highRisk.includes(toolName)) return "high";
+    if (mediumRisk.includes(toolName)) return "medium";
+    return "low";
+  }
+
+  let pendingPermissions = $derived(wsStore.pendingPermissions);
+
+  function approve(id: string) {
+    wsStore.respondToPermission(id, true);
   }
 
   function deny(id: string) {
-    if (wsStore.connection?.readyState === 1) {
-      wsStore.connection.send(JSON.stringify({
-        type: "permission.response",
-        id,
-        approved: false,
-      }));
-    }
-    pendingPermissions = pendingPermissions.filter((p) => p.id !== id);
+    wsStore.respondToPermission(id, false);
   }
 
   function approveAll() {
     for (const p of pendingPermissions) {
-      approve(p.id);
+      wsStore.respondToPermission(p.id, true);
     }
   }
 </script>
@@ -67,7 +59,6 @@
 {#if pendingPermissions.length > 0}
   <div class="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
     <div class="bg-surface-2 border border-border rounded-2xl shadow-2xl max-w-lg w-full mx-4 overflow-hidden">
-      <!-- Header -->
       <div class="px-5 py-4 border-b border-border flex items-center justify-between">
         <div class="flex items-center gap-2">
           <div class="w-3 h-3 rounded-full bg-yellow-400 animate-pulse"></div>
@@ -78,23 +69,27 @@
         </span>
       </div>
 
-      <!-- Requests -->
       <div class="max-h-80 overflow-y-auto p-4 space-y-3">
         {#each pendingPermissions as perm (perm.id)}
-          <div class="p-3 rounded-xl border {riskBorder(perm.risk)} bg-surface-3">
+          {@const risk = determineRiskLevel(perm.toolName)}
+          {@const RiskIcon = getRiskIcon(risk)}
+          <div class="p-3 rounded-xl border {getRiskBorder(risk)} bg-surface-3">
             <div class="flex items-start justify-between mb-2">
               <div>
-                <span class="text-xs font-mono text-text-secondary">{perm.agentName}</span>
-                <span class="text-text-muted mx-1">→</span>
-                <span class="text-xs font-mono font-bold text-text-primary">{perm.toolName}</span>
+                <span class="text-xs font-mono text-text-secondary">{perm.toolName}</span>
+                <ArrowRight size={10} class="mx-1" style="color: var(--color-text-muted);" />
+                <span class="text-xs font-mono font-bold text-text-primary">{perm.description}</span>
               </div>
-              <span class="text-[10px] uppercase font-bold {riskColor(perm.risk)}">
-                {perm.risk} risk
+              <span class="flex items-center gap-1 text-[10px] uppercase font-bold {getRiskColor(risk)}">
+                <RiskIcon size={12} />
+                {risk}
               </span>
             </div>
-            <p class="text-xs text-text-secondary leading-relaxed mb-3">
-              {perm.description}
-            </p>
+            {#if perm.path}
+              <p class="text-xs text-text-muted font-mono mb-3">
+                {perm.path}
+              </p>
+            {/if}
             <div class="flex gap-2 justify-end">
               <button
                 onclick={() => deny(perm.id)}
@@ -113,12 +108,12 @@
         {/each}
       </div>
 
-      <!-- Footer -->
       {#if pendingPermissions.length > 1}
         <div class="px-5 py-3 border-t border-border flex justify-end">
           <button
             onclick={approveAll}
-            class="px-4 py-1.5 text-xs rounded-lg bg-accent text-black font-medium hover:bg-accent/80 transition-colors"
+            class="px-4 py-1.5 text-xs rounded-lg font-medium transition-colors"
+            style="background: var(--color-accent); color: var(--color-surface-0);"
           >
             Approve All ({pendingPermissions.length})
           </button>

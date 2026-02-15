@@ -5,6 +5,9 @@ export interface ToolContext {
   sessionId: string;
   workingDirectory: string;
   signal?: AbortSignal;
+  /** Optional callback for streaming file edit deltas to the UI */
+  emitFileEdit?: (event: { path: string; delta: string; totalLength: number; operation: "create" | "edit" }) => void;
+  emitFileComplete?: (event: { path: string; totalLines: number; operation: "create" | "edit" }) => void;
 }
 
 export interface ToolCallInput {

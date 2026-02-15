@@ -110,9 +110,8 @@ export interface KoryTask {
 }
 
 export class KoryManager {
-  private activeWorkers = new Map<string, { agent: AgentIdentity; status: AgentStatus; task: KoryTask }>();
+  private activeWorkers = new Map<string, { agent: AgentIdentity; status: AgentStatus; task: KoryTask; abort: AbortController }>();
   private tasks: KoryTask[] = [];
-  private abortController = new AbortController();
 
   constructor(
     private providers: ProviderRegistry,
@@ -120,18 +119,22 @@ export class KoryManager {
     private workingDirectory: string,
   ) {}
 
-  /** Process a user's high-level "vibe" — the main entry point. */
-  async processVibe(sessionId: string, userMessage: string): Promise<void> {
+  /** Process a user's request — the main entry point. */
+  async processTask(sessionId: string, userMessage: string): Promise<void> {
     this.emitThought(sessionId, "analyzing", `Analyzing request: "${userMessage.slice(0, 100)}..."`);
 
-    // Step 1: Classify the domain
-    const domain = this.classifyDomain(userMessage);
+    // Step 1: Classify the domain — try LLM first, fall back to keywords
+    let domain: WorkerDomain;
+    try {
+      domain = await this.classifyDomainLLM(userMessage);
+    } catch {
+      domain = this.classifyDomainKeywords(userMessage);
+    }
     this.emitRouting(sessionId, domain);
 
-    // Step 2: Get Kory's plan via LLM
-    this.emitThought(sessionId, "routing", `Domain classified as: ${domain}. Preparing task plan...`);
+    // Step 2: Route to appropriate model
+    this.emitThought(sessionId, "routing", `Domain: ${domain}. Selecting specialist...`);
 
-    // Step 3: Execute with the appropriate model
     const routing = DOMAIN_MODEL_MAP[domain];
     const provider = this.providers.resolveProvider(routing.model, routing.provider);
 
@@ -139,7 +142,7 @@ export class KoryManager {
       // Fallback: try any available provider
       const fallback = this.providers.getAvailable()[0];
       if (!fallback) {
-        this.emitError(sessionId, "No providers available. Configure API keys.");
+        this.emitError(sessionId, "No providers available. Add API keys in the Auth Hub.");
         return;
       }
       this.emitThought(sessionId, "routing", `Primary provider unavailable. Falling back to ${fallback.name}`);
@@ -148,6 +151,41 @@ export class KoryManager {
     }
 
     await this.executeWithProvider(sessionId, provider, userMessage, domain);
+  }
+
+  /** LLM-based domain classification — more accurate than keywords. */
+  private async classifyDomainLLM(message: string): Promise<WorkerDomain> {
+    const classifier = this.providers.getAvailable()[0];
+    if (!classifier) throw new Error("No provider for classification");
+
+    const classifyPrompt = `Classify this task into exactly ONE domain. Reply with only the domain name, nothing else.
+
+Domains:
+- ui: Frontend, UI components, CSS, Svelte, React, design, styling, animations, layouts
+- backend: C++, systems programming, servers, APIs, databases, performance, audio/DSP, compilation
+- test: Writing tests, running tests, test frameworks, coverage, assertions
+- review: Code review, auditing, checking for bugs, security analysis
+- general: Refactoring, documentation, config, general programming, anything else
+
+Task: "${message.slice(0, 500)}"
+
+Domain:`;
+
+    let result = "";
+    for await (const event of classifier.streamResponse({
+      model: classifier.listModels()[0]?.id ?? "",
+      systemPrompt: "You are a task classifier. Reply with exactly one word: ui, backend, test, review, or general.",
+      messages: [{ role: "user", content: classifyPrompt }],
+      maxTokens: 10,
+    })) {
+      if (event.type === "content_delta") result += event.content ?? "";
+    }
+
+    const domain = result.trim().toLowerCase() as WorkerDomain;
+    if (["ui", "backend", "test", "review", "general"].includes(domain)) {
+      return domain;
+    }
+    return "general";
   }
 
   private async executeWithProvider(
@@ -159,6 +197,7 @@ export class KoryManager {
     if (!provider) return;
 
     const workerId = `worker-${nanoid(8)}`;
+    const workerAbort = new AbortController();
     const workerIdentity: AgentIdentity = {
       id: workerId,
       name: `${domain.charAt(0).toUpperCase() + domain.slice(1)} Worker`,
@@ -185,6 +224,7 @@ export class KoryManager {
         assignedProvider: provider.name,
         status: "active",
       },
+      abort: workerAbort,
     });
 
     this.emitWSMessage(sessionId, "agent.status", {
@@ -199,7 +239,24 @@ export class KoryManager {
     const ctx: ToolContext = {
       sessionId,
       workingDirectory: this.workingDirectory,
-      signal: this.abortController.signal,
+      signal: workerAbort.signal,
+      emitFileEdit: (event) => {
+        this.emitWSMessage(sessionId, "stream.file_delta", {
+          agentId: workerId,
+          path: event.path,
+          delta: event.delta,
+          totalLength: event.totalLength,
+          operation: event.operation,
+        });
+      },
+      emitFileComplete: (event) => {
+        this.emitWSMessage(sessionId, "stream.file_complete", {
+          agentId: workerId,
+          path: event.path,
+          totalLines: event.totalLines,
+          operation: event.operation,
+        });
+      },
     };
 
     // Build conversation history for multi-turn
@@ -227,7 +284,7 @@ export class KoryManager {
           })),
           tools: toolDefs,
           maxTokens: 16_384,
-          signal: this.abortController.signal,
+          signal: workerAbort.signal,
         };
 
         let pendingToolCalls = new Map<string, { name: string; input: string }>();
@@ -435,7 +492,7 @@ export class KoryManager {
   }
 
   /** Classify the domain of a user request based on keyword analysis. */
-  classifyDomain(message: string): WorkerDomain {
+  classifyDomainKeywords(message: string): WorkerDomain {
     const lower = message.toLowerCase();
     const scores: Record<WorkerDomain, number> = { ui: 0, backend: 0, general: 0, review: 0, test: 0 };
 
@@ -462,9 +519,19 @@ export class KoryManager {
 
   /** Cancel all active work. */
   cancel() {
-    this.abortController.abort();
-    this.abortController = new AbortController();
+    for (const [id, worker] of this.activeWorkers) {
+      worker.abort.abort();
+    }
     this.activeWorkers.clear();
+  }
+
+  /** Cancel a specific worker. */
+  cancelWorker(workerId: string) {
+    const worker = this.activeWorkers.get(workerId);
+    if (worker) {
+      worker.abort.abort();
+      this.activeWorkers.delete(workerId);
+    }
   }
 
   // ─── Event Emission Helpers ─────────────────────────────────────────────

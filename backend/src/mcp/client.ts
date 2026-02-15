@@ -3,6 +3,7 @@
 // This allows Koryphaios to connect to external tool servers.
 
 import { spawn, type ChildProcess } from "child_process";
+import { mcpLog } from "../logger";
 import type { Tool, ToolCallInput, ToolContext, ToolCallOutput } from "../tools/registry";
 
 // ─── MCP Protocol Types ─────────────────────────────────────────────────────
@@ -96,11 +97,11 @@ export class MCPClient {
     });
 
     this.process.stderr?.on("data", (data: Buffer) => {
-      console.error(`[MCP:${this.serverName}] stderr: ${data.toString().trim()}`);
+      mcpLog.error({ server: this.serverName, output: data.toString().trim() }, "MCP stderr");
     });
 
     this.process.on("exit", (code) => {
-      console.log(`[MCP:${this.serverName}] Process exited with code ${code}`);
+      mcpLog.info({ server: this.serverName, code }, "MCP process exited");
       this.connected = false;
     });
 
@@ -124,7 +125,7 @@ export class MCPClient {
     this.tools = (toolsResult.result as any)?.tools ?? [];
 
     this.connected = true;
-    console.log(`[MCP:${this.serverName}] Connected. ${this.tools.length} tools available.`);
+    mcpLog.info({ server: this.serverName, tools: this.tools.length }, "MCP connected via stdio");
   }
 
   private async connectSSE(): Promise<void> {
@@ -171,7 +172,7 @@ export class MCPClient {
     }
 
     this.connected = true;
-    console.log(`[MCP:${this.serverName}] Connected via SSE. ${this.tools.length} tools available.`);
+    mcpLog.info({ server: this.serverName, tools: this.tools.length }, "MCP connected via SSE");
   }
 
   async callTool(name: string, args: Record<string, unknown>): Promise<MCPToolResult> {
@@ -331,17 +332,17 @@ export class MCPManager {
       for (const toolDef of client.availableTools) {
         const wrapper = new MCPToolWrapper(client, toolDef);
         toolRegistry.register(wrapper);
-        console.log(`[MCP] Registered tool: ${wrapper.name}`);
+        mcpLog.info({ tool: wrapper.name }, "Registered MCP tool");
       }
     } catch (err: any) {
-      console.error(`[MCP] Failed to connect to ${config.name}: ${err.message}`);
+      mcpLog.error({ server: config.name, err: err.message }, "Failed to connect MCP server");
     }
   }
 
   async disconnectAll(): Promise<void> {
     for (const [name, client] of this.clients) {
       await client.disconnect();
-      console.log(`[MCP] Disconnected from ${name}`);
+      mcpLog.info({ server: name }, "MCP disconnected");
     }
     this.clients.clear();
   }

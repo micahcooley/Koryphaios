@@ -12,6 +12,7 @@ import { serverLog } from "./logger";
 import { getCorsHeaders, validateSessionId, validateProviderName, sanitizeString, encryptApiKey, RateLimiter } from "./security";
 import { ConfigError, ValidationError, SessionError, handleError, safeJsonParse } from "./errors";
 import { SESSION, MESSAGE, ID, RATE_LIMIT, SERVER, FS, AGENT, DEFAULT_CONTEXT_PATHS } from "./constants";
+import { validateConfig, validateEnvironment } from "./config-schema";
 import { nanoid } from "nanoid";
 import { existsSync, readFileSync, mkdirSync, writeFileSync, unlinkSync, readdirSync } from "fs";
 import { join } from "path";
@@ -66,6 +67,9 @@ function loadConfig(): KoryphaiosConfig {
     contextPaths: fileConfig.contextPaths ?? DEFAULT_CONTEXT_PATHS,
     dataDirectory: fileConfig.dataDirectory ?? FS.DEFAULT_DATA_DIR,
   };
+
+  // Validate configuration
+  validateConfig(config);
 
   return config;
 }
@@ -320,6 +324,9 @@ async function main() {
   serverLog.info("       KORYPHAIOS v0.1.0");
   serverLog.info("  AI Agent Orchestration Dashboard");
   serverLog.info("═══════════════════════════════════════");
+
+  // Validate environment variables
+  validateEnvironment();
 
   const config = loadConfig();
 
@@ -746,6 +753,68 @@ async function main() {
   if (telegram && process.env.TELEGRAM_POLLING === "true") {
     await telegram.startPolling();
   }
+
+  // ─── Graceful Shutdown ──────────────────────────────────────────────────
+  
+  let isShuttingDown = false;
+
+  async function gracefulShutdown(signal: string) {
+    if (isShuttingDown) {
+      serverLog.warn("Shutdown already in progress, forcing exit");
+      process.exit(1);
+    }
+
+    isShuttingDown = true;
+    serverLog.info({ signal }, "Received shutdown signal, starting graceful shutdown");
+
+    try {
+      // 1. Stop accepting new connections
+      server.stop(true);
+      serverLog.info("Server stopped accepting new connections");
+
+      // 2. Cancel all running agents
+      kory.cancel();
+      serverLog.info("Cancelled all running agents");
+
+      // 3. Close WebSocket connections gracefully
+      wsManager.broadcast({
+        type: "system.info",
+        payload: { message: "Server shutting down" },
+        timestamp: Date.now(),
+      });
+      serverLog.info("Notified WebSocket clients");
+
+      // 4. Wait a moment for final messages to send
+      await new Promise(resolve => setTimeout(resolve, 1000));
+
+      // 5. Stop Telegram bot if running
+      if (telegram && typeof (telegram as any).stop === "function") {
+        (telegram as any).stop();
+        serverLog.info("Stopped Telegram bot");
+      }
+
+      serverLog.info("Graceful shutdown complete");
+      process.exit(0);
+    } catch (err) {
+      serverLog.error(err, "Error during graceful shutdown");
+      process.exit(1);
+    }
+  }
+
+  // Register shutdown handlers
+  process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));
+  process.on("SIGINT", () => gracefulShutdown("SIGINT"));
+
+  // Handle uncaught errors
+  process.on("uncaughtException", (err) => {
+    serverLog.fatal(err, "Uncaught exception");
+    gracefulShutdown("uncaughtException");
+  });
+
+  process.on("unhandledRejection", (reason, promise) => {
+    serverLog.fatal({ reason, promise }, "Unhandled promise rejection");
+    gracefulShutdown("unhandledRejection");
+  });
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────────────

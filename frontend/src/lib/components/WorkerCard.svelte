@@ -1,6 +1,3 @@
-<!--
-  WorkerCard.svelte — Individual agent status card with domain-specific neon glow.
--->
 <script lang="ts">
   import type { AgentIdentity, AgentStatus } from '@koryphaios/shared';
 
@@ -11,6 +8,8 @@
     thinking: string;
     toolCalls: Array<{ name: string; status: string }>;
     task: string;
+    tokensUsed: number;
+    contextMax: number;
   }
 
   let { agent }: { agent: AgentState } = $props();
@@ -32,40 +31,60 @@
     'Idle'
   );
 
-  let statusColor = $derived(
-    agent.status === 'done' ? 'text-success' :
-    agent.status === 'error' ? 'text-error' :
-    agent.status === 'idle' ? 'text-text-muted' :
-    'text-text-primary'
-  );
-
   let isActive = $derived(
     agent.status === 'thinking' || agent.status === 'streaming' || agent.status === 'tool_calling'
   );
+
+  let contextPercent = $derived(
+    agent.contextMax > 0 ? Math.min((agent.tokensUsed / agent.contextMax) * 100, 100) : 0
+  );
+
+  let contextColor = $derived(
+    contextPercent > 80 ? 'bg-red-500' :
+    contextPercent > 50 ? 'bg-amber-500' :
+    'bg-emerald-500'
+  );
 </script>
 
-<div class="p-3 rounded-lg border border-border bg-surface-2 transition-all duration-300 {isActive ? `${glowClass} glow-active` : ''}">
-  <div class="flex items-center justify-between mb-2">
-    <div class="flex items-center gap-2">
-      <div class="w-2 h-2 rounded-full {isActive ? 'bg-green-400 animate-pulse' : agent.status === 'done' ? 'bg-green-600' : 'bg-surface-4'}"></div>
-      <span class="text-sm font-medium text-text-primary">{agent.identity.name}</span>
+<div class="agent-card rounded-lg border transition-all duration-300 min-w-[180px] max-w-[240px]
+            {isActive ? `active ${glowClass} glow-active` : 'opacity-70'}"
+     style="background: var(--color-surface-2); border-color: var(--color-border); padding: 10px 12px;">
+  <!-- Header -->
+  <div class="flex items-center justify-between mb-1.5">
+    <div class="flex items-center gap-1.5">
+      <div class="w-1.5 h-1.5 rounded-full {isActive ? 'bg-emerald-400 animate-pulse' : agent.status === 'done' ? 'bg-emerald-600' : ''}"
+           style="{!isActive && agent.status !== 'done' ? 'background: var(--color-surface-4);' : ''}"></div>
+      <span class="text-xs font-medium" style="color: var(--color-text-primary);">{agent.identity.name}</span>
     </div>
-    <span class="text-xs text-text-muted">{agent.identity.model.split('-').slice(0, 2).join('-')}</span>
+    <span class="text-[10px] capitalize px-1.5 py-0.5 rounded" style="background: var(--color-surface-3); color: var(--color-text-muted);">{agent.identity.domain}</span>
   </div>
 
-  <div class="flex items-center justify-between">
-    <span class="text-xs {statusColor}">{statusText}</span>
-    <span class="text-xs text-text-muted capitalize px-1.5 py-0.5 rounded bg-surface-3">{agent.identity.domain}</span>
+  <!-- Status -->
+  <div class="flex items-center justify-between mb-1.5">
+    <span class="text-[11px]" style="color: {agent.status === 'done' ? 'var(--color-success)' : agent.status === 'error' ? 'var(--color-error)' : 'var(--color-text-secondary)'};">
+      {statusText}
+    </span>
+    <span class="text-[10px]" style="color: var(--color-text-muted);">{agent.identity.model.split('-').slice(0, 2).join('-')}</span>
   </div>
 
-  {#if agent.task}
-    <p class="text-xs text-text-muted mt-2 line-clamp-2">{agent.task.slice(0, 120)}</p>
+  <!-- Context window bar -->
+  {#if agent.tokensUsed > 0}
+    <div class="mb-1">
+      <div class="flex items-center justify-between mb-0.5">
+        <span class="text-[9px]" style="color: var(--color-text-muted);">Context</span>
+        <span class="text-[9px]" style="color: var(--color-text-muted);">{Math.round(agent.tokensUsed / 1000)}k / {Math.round(agent.contextMax / 1000)}k</span>
+      </div>
+      <div class="h-1 rounded-full overflow-hidden" style="background: var(--color-surface-4);">
+        <div class="h-full rounded-full transition-all {contextColor}" style="width: {contextPercent}%;"></div>
+      </div>
+    </div>
   {/if}
 
+  <!-- Recent tools -->
   {#if agent.toolCalls.length > 0}
-    <div class="mt-2 flex flex-wrap gap-1">
-      {#each agent.toolCalls.slice(-3) as tc}
-        <span class="text-xs px-1.5 py-0.5 rounded bg-surface-3 text-accent">{tc.name}</span>
+    <div class="flex flex-wrap gap-1 mt-1">
+      {#each agent.toolCalls.slice(-2) as tc}
+        <span class="text-[10px] px-1 py-0.5 rounded" style="background: var(--color-surface-3); color: var(--color-accent);">{tc.name}</span>
       {/each}
     </div>
   {/if}

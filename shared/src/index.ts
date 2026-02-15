@@ -34,11 +34,14 @@ export interface ModelDef {
 export interface ProviderConfig {
   name: ProviderName;
   apiKey?: string;
+  authToken?: string;
   baseUrl?: string;
   disabled: boolean;
   models?: string[];
   headers?: Record<string, string>;
 }
+
+export type ProviderAuthMode = "api_key" | "auth_only" | "api_key_or_auth" | "base_url_only";
 
 // ─── Agent & Worker Types ───────────────────────────────────────────────────
 
@@ -66,13 +69,15 @@ export type ToolName =
   | "read_file"
   | "write_file"
   | "edit_file"
+  | "delete_file"
+  | "move_file"
   | "patch"
+  | "diff"
   | "grep"
   | "glob"
   | "ls"
   | "web_fetch"
   | "web_search"
-  | "diff"
   | "agent"
   | string; // MCP tools use dynamic names
 
@@ -159,6 +164,9 @@ export type WSEventType =
   | "stream.tool_call"
   | "stream.tool_result"
   | "stream.complete"
+  // File edit streaming (Cursor-style per-token preview)
+  | "stream.file_delta"
+  | "stream.file_complete"
   // Session events
   | "session.created"
   | "session.updated"
@@ -220,6 +228,23 @@ export interface StreamToolResultPayload {
   toolResult: ToolResult;
 }
 
+export interface StreamFileDeltaPayload {
+  agentId: string;
+  path: string;
+  delta: string;
+  /** Current accumulated content so far */
+  totalLength: number;
+  /** 'create' for new files, 'edit' for edits */
+  operation: "create" | "edit";
+}
+
+export interface StreamFileCompletePayload {
+  agentId: string;
+  path: string;
+  totalLines: number;
+  operation: "create" | "edit";
+}
+
 export interface KoryThoughtPayload {
   thought: string;
   phase: "analyzing" | "routing" | "delegating" | "verifying" | "synthesizing";
@@ -248,6 +273,10 @@ export interface ProviderStatusPayload {
     enabled: boolean;
     authenticated: boolean;
     models: string[];
+    authMode: ProviderAuthMode;
+    supportsApiKey: boolean;
+    supportsAuthToken: boolean;
+    requiresBaseUrl: boolean;
     error?: string;
   }>;
 }
@@ -303,4 +332,187 @@ export interface SendMessageRequest {
 export interface CreateSessionRequest {
   title?: string;
   parentSessionId?: string;
+}
+
+// ─── Reasoning Configuration ─────────────────────────────────────────────
+// Comprehensive reasoning config based on provider + model patterns
+// Researched from official API docs (Anthropic, OpenAI, Google, Groq, xAI)
+
+export type ReasoningLevel = string;
+
+export interface ReasoningConfig {
+  parameter: string;
+  options: { value: string; label: string; description: string }[];
+  defaultValue: string;
+  supportsModelSpecific: boolean;
+}
+
+export const PROVIDER_REASONING: Record<string, ReasoningConfig | null> = {
+  // Anthropic Claude - effort (Opus 4.5+, Sonnet 3.7+)
+  anthropic: {
+    parameter: 'effort',
+    options: [
+      { value: 'low', label: 'Low', description: 'Faster, less thorough' },
+      { value: 'medium', label: 'Medium', description: 'Balanced' },
+      { value: 'high', label: 'High', description: 'Best quality (default)' },
+      { value: 'max', label: 'Max', description: 'Maximum reasoning' },
+    ],
+    defaultValue: 'high',
+    supportsModelSpecific: false,
+  },
+
+  // OpenAI - varies significantly by model
+  // o1/o3 series: low/medium/high
+  // GPT-5 series: none/minimal/low/medium/high/xhigh (varies by model)
+  openai: {
+    parameter: 'reasoning.effort',
+    options: [
+      { value: 'low', label: 'Low', description: 'Less reasoning effort' },
+      { value: 'medium', label: 'Medium', description: 'Balanced (default)' },
+      { value: 'high', label: 'High', description: 'More reasoning effort' },
+    ],
+    defaultValue: 'medium',
+    supportsModelSpecific: true,
+  },
+
+  // Google Gemini - thinkingBudget tokens or thinkingLevel
+  gemini: {
+    parameter: 'thinkingConfig.thinkingBudget',
+    options: [
+      { value: '0', label: 'Off', description: 'No thinking' },
+      { value: '1024', label: 'Low', description: '~1K tokens' },
+      { value: '8192', label: 'Medium', description: '~8K tokens' },
+      { value: '24576', label: 'High', description: '~24K tokens' },
+    ],
+    defaultValue: '8192',
+    supportsModelSpecific: false,
+  },
+
+  // Groq - varies by model family
+  // Qwen models: none/default
+  // GPT-OSS models: low/medium/high
+  groq: {
+    parameter: 'reasoning_effort',
+    options: [
+      { value: 'low', label: 'Low', description: 'Small reasoning effort' },
+      { value: 'medium', label: 'Medium', description: 'Balanced (default)' },
+      { value: 'high', label: 'High', description: 'Maximum reasoning effort' },
+    ],
+    defaultValue: 'medium',
+    supportsModelSpecific: true,
+  },
+
+  // xAI Grok - only low/high for Grok 3
+  xai: {
+    parameter: 'reasoning_effort',
+    options: [
+      { value: 'low', label: 'Low', description: 'Lower reasoning' },
+      { value: 'high', label: 'High', description: 'Higher reasoning (default)' },
+    ],
+    defaultValue: 'high',
+    supportsModelSpecific: false,
+  },
+
+  // Azure OpenAI - same as OpenAI
+  azure: {
+    parameter: 'reasoning.effort',
+    options: [
+      { value: 'low', label: 'Low', description: 'Less reasoning' },
+      { value: 'medium', label: 'Medium', description: 'Balanced (default)' },
+      { value: 'high', label: 'High', description: 'More reasoning' },
+    ],
+    defaultValue: 'medium',
+    supportsModelSpecific: true,
+  },
+
+  // No reasoning control exposed
+  copilot: null,
+  openrouter: null,
+  bedrock: null,
+  vertexai: null,
+  local: null,
+};
+
+// Model-specific reasoning options (for providers that vary by model)
+export const MODEL_REASONING_OVERRIDES: Array<{
+  pattern: RegExp;
+  provider: string;
+  options: { value: string; label: string; description: string }[];
+  defaultValue: string;
+}> = [
+  // OpenAI GPT-5 series - supports xhigh
+  { pattern: /^gpt-5/, provider: 'openai', options: [
+    { value: 'none', label: 'None', description: 'No explicit reasoning' },
+    { value: 'minimal', label: 'Minimal', description: 'Minimal effort' },
+    { value: 'low', label: 'Low', description: 'Low effort' },
+    { value: 'medium', label: 'Medium', description: 'Balanced' },
+    { value: 'high', label: 'High', description: 'High effort' },
+    { value: 'xhigh', label: 'X-High', description: 'Maximum effort' },
+  ], defaultValue: 'high' },
+
+  // OpenAI o1-mini - NO reasoning_effort (not supported)
+  { pattern: /^o1-mini/, provider: 'openai', options: [], defaultValue: '' },
+
+  // OpenAI o1/o3/o4 series - supports low/medium/high
+  { pattern: /^(o1|o3|o4)/, provider: 'openai', options: [
+    { value: 'low', label: 'Low', description: 'Less reasoning' },
+    { value: 'medium', label: 'Medium', description: 'Balanced (default)' },
+    { value: 'high', label: 'High', description: 'More reasoning' },
+  ], defaultValue: 'medium' },
+
+  // Groq Qwen models - only none/default
+  { pattern: /^qwen/, provider: 'groq', options: [
+    { value: 'none', label: 'None', description: 'Disable reasoning' },
+    { value: 'default', label: 'Default', description: 'Enable reasoning' },
+  ], defaultValue: 'default' },
+
+  // Groq GPT-OSS models - low/medium/high
+  { pattern: /^gpt-oss/, provider: 'groq', options: [
+    { value: 'low', label: 'Low', description: 'Low effort' },
+    { value: 'medium', label: 'Medium', description: 'Balanced (default)' },
+    { value: 'high', label: 'High', description: 'High effort' },
+  ], defaultValue: 'medium' },
+
+  // Gemini 2.5/3 - thinkingLevel option
+  { pattern: /^(gemini-2\.5|gemini-3)/, provider: 'gemini', options: [
+    { value: '0', label: 'Off', description: 'No thinking' },
+    { value: 'low', label: 'Low', description: 'Low thinking' },
+    { value: 'high', label: 'High', description: 'High thinking' },
+  ], defaultValue: 'high' },
+];
+
+export function getReasoningConfig(provider: string, model?: string): ReasoningConfig | null {
+  const providerConfig = PROVIDER_REASONING[provider];
+  if (!providerConfig) return null;
+  
+  // If no model specified or provider doesn't have model-specific options
+  if (!model || !providerConfig.supportsModelSpecific) {
+    return providerConfig;
+  }
+  
+  // Check for model-specific overrides
+  for (const override of MODEL_REASONING_OVERRIDES) {
+    if (override.pattern.test(model) && override.provider === provider) {
+      if (override.options.length === 0) {
+        return null; // Model doesn't support reasoning (e.g., o1-mini)
+      }
+      return {
+        ...providerConfig,
+        options: override.options,
+        defaultValue: override.defaultValue,
+      };
+    }
+  }
+  
+  return providerConfig;
+}
+
+export function hasReasoningSupport(provider: string, model?: string): boolean {
+  const config = getReasoningConfig(provider, model);
+  return config !== null && config.options.length > 0;
+}
+
+export function getDefaultReasoning(provider: string, model?: string): string {
+  const config = getReasoningConfig(provider, model);
+  return config?.defaultValue ?? 'medium';
 }

@@ -1,8 +1,8 @@
 // File tools — read, write, edit, list, grep, glob.
 // Ported from OpenCode's tools/file.go, view.go, write.go, edit.go, grep.go, glob.go, ls.go.
 
-import { readFileSync, writeFileSync, existsSync, statSync, readdirSync, mkdirSync } from "fs";
-import { join, relative, dirname } from "path";
+import { readFileSync, writeFileSync, existsSync, statSync, readdirSync, mkdirSync, unlinkSync, renameSync, copyFileSync } from "fs";
+import { join, relative, dirname, basename } from "path";
 import type { Tool, ToolContext, ToolCallInput, ToolCallOutput } from "./registry";
 
 // ─── Read File ──────────────────────────────────────────────────────────────
@@ -75,8 +75,29 @@ export class WriteFileTool implements Tool {
 
     try {
       mkdirSync(dirname(absPath), { recursive: true });
+
+      // Stream content to UI in chunks for Cursor-style live preview
+      if (ctx.emitFileEdit) {
+        const CHUNK_SIZE = 80; // ~80 chars per emit for smooth animation
+        let sent = 0;
+        while (sent < content.length) {
+          const chunk = content.slice(sent, sent + CHUNK_SIZE);
+          sent += chunk.length;
+          ctx.emitFileEdit({ path: absPath, delta: chunk, totalLength: sent, operation: "create" });
+          // Yield to event loop every few chunks for smooth streaming
+          if (sent % (CHUNK_SIZE * 5) === 0) {
+            await new Promise(r => setTimeout(r, 0));
+          }
+        }
+      }
+
       writeFileSync(absPath, content, "utf-8");
       const lines = content.split("\n").length;
+
+      if (ctx.emitFileComplete) {
+        ctx.emitFileComplete({ path: absPath, totalLines: lines, operation: "create" });
+      }
+
       return {
         callId: call.id,
         name: this.name,
@@ -136,7 +157,26 @@ export class EditFileTool implements Tool {
       }
 
       const newContent = content.replace(old_str, new_str);
+
+      // Stream the replacement region to UI
+      if (ctx.emitFileEdit && new_str.length > 0) {
+        const CHUNK_SIZE = 80;
+        let sent = 0;
+        while (sent < new_str.length) {
+          const chunk = new_str.slice(sent, sent + CHUNK_SIZE);
+          sent += chunk.length;
+          ctx.emitFileEdit({ path: absPath, delta: chunk, totalLength: sent, operation: "edit" });
+          if (sent % (CHUNK_SIZE * 5) === 0) {
+            await new Promise(r => setTimeout(r, 0));
+          }
+        }
+      }
+
       writeFileSync(absPath, newContent, "utf-8");
+
+      if (ctx.emitFileComplete) {
+        ctx.emitFileComplete({ path: absPath, totalLines: newContent.split("\n").length, operation: "edit" });
+      }
 
       return {
         callId: call.id,
@@ -306,4 +346,322 @@ export class LsTool implements Tool {
 
     return result;
   }
+}
+
+// ─── Delete File ────────────────────────────────────────────────────────────
+
+export class DeleteFileTool implements Tool {
+  readonly name = "delete_file";
+  readonly description = `Delete a file or empty directory. Cannot delete non-empty directories for safety.`;
+
+  readonly inputSchema = {
+    type: "object",
+    properties: {
+      path: { type: "string", description: "Path to the file or empty directory to delete." },
+    },
+    required: ["path"],
+  };
+
+  async run(ctx: ToolContext, call: ToolCallInput): Promise<ToolCallOutput> {
+    const { path: filePath } = call.input as { path: string };
+    const absPath = filePath.startsWith("/") ? filePath : join(ctx.workingDirectory, filePath);
+
+    if (!existsSync(absPath)) {
+      return { callId: call.id, name: this.name, output: `Path not found: ${absPath}`, isError: true, durationMs: 0 };
+    }
+
+    try {
+      const stat = statSync(absPath);
+      if (stat.isDirectory()) {
+        const entries = readdirSync(absPath);
+        if (entries.length > 0) {
+          return { callId: call.id, name: this.name, output: `Cannot delete non-empty directory: ${absPath} (${entries.length} entries). Remove contents first.`, isError: true, durationMs: 0 };
+        }
+        const { rmdirSync } = await import("fs");
+        rmdirSync(absPath);
+        return { callId: call.id, name: this.name, output: `Deleted empty directory: ${absPath}`, isError: false, durationMs: 0 };
+      }
+
+      unlinkSync(absPath);
+      return { callId: call.id, name: this.name, output: `Deleted file: ${absPath}`, isError: false, durationMs: 0 };
+    } catch (err: any) {
+      return { callId: call.id, name: this.name, output: `Error deleting: ${err.message}`, isError: true, durationMs: 0 };
+    }
+  }
+}
+
+// ─── Move / Rename File ─────────────────────────────────────────────────────
+
+export class MoveFileTool implements Tool {
+  readonly name = "move_file";
+  readonly description = `Move or rename a file or directory. Creates parent directories for the destination if needed.`;
+
+  readonly inputSchema = {
+    type: "object",
+    properties: {
+      source: { type: "string", description: "Source path to move from." },
+      destination: { type: "string", description: "Destination path to move to." },
+    },
+    required: ["source", "destination"],
+  };
+
+  async run(ctx: ToolContext, call: ToolCallInput): Promise<ToolCallOutput> {
+    const { source, destination } = call.input as { source: string; destination: string };
+    const absSrc = source.startsWith("/") ? source : join(ctx.workingDirectory, source);
+    const absDest = destination.startsWith("/") ? destination : join(ctx.workingDirectory, destination);
+
+    if (!existsSync(absSrc)) {
+      return { callId: call.id, name: this.name, output: `Source not found: ${absSrc}`, isError: true, durationMs: 0 };
+    }
+
+    if (existsSync(absDest)) {
+      return { callId: call.id, name: this.name, output: `Destination already exists: ${absDest}`, isError: true, durationMs: 0 };
+    }
+
+    try {
+      mkdirSync(dirname(absDest), { recursive: true });
+      renameSync(absSrc, absDest);
+      return { callId: call.id, name: this.name, output: `Moved: ${absSrc} → ${absDest}`, isError: false, durationMs: 0 };
+    } catch (err: any) {
+      // renameSync fails across devices — fallback to copy+delete for files
+      if (err.code === "EXDEV") {
+        try {
+          const stat = statSync(absSrc);
+          if (stat.isDirectory()) {
+            return { callId: call.id, name: this.name, output: `Cannot move directory across filesystems: ${err.message}`, isError: true, durationMs: 0 };
+          }
+          copyFileSync(absSrc, absDest);
+          unlinkSync(absSrc);
+          return { callId: call.id, name: this.name, output: `Moved (cross-device): ${absSrc} → ${absDest}`, isError: false, durationMs: 0 };
+        } catch (copyErr: any) {
+          return { callId: call.id, name: this.name, output: `Error moving file: ${copyErr.message}`, isError: true, durationMs: 0 };
+        }
+      }
+      return { callId: call.id, name: this.name, output: `Error moving: ${err.message}`, isError: true, durationMs: 0 };
+    }
+  }
+}
+
+// ─── Diff Tool ──────────────────────────────────────────────────────────────
+
+export class DiffTool implements Tool {
+  readonly name = "diff";
+  readonly description = `Show a unified diff between two files, or between the current content and provided new content. Useful for reviewing changes before applying them.`;
+
+  readonly inputSchema = {
+    type: "object",
+    properties: {
+      path_a: { type: "string", description: "Path to the first file (or the file to diff against new content)." },
+      path_b: { type: "string", description: "Path to the second file. If omitted, use 'new_content' instead." },
+      new_content: { type: "string", description: "New content to diff against the file at path_a." },
+    },
+    required: ["path_a"],
+  };
+
+  async run(ctx: ToolContext, call: ToolCallInput): Promise<ToolCallOutput> {
+    const { path_a, path_b, new_content } = call.input as {
+      path_a: string;
+      path_b?: string;
+      new_content?: string;
+    };
+
+    const absA = path_a.startsWith("/") ? path_a : join(ctx.workingDirectory, path_a);
+
+    if (!existsSync(absA)) {
+      return { callId: call.id, name: this.name, output: `File not found: ${absA}`, isError: true, durationMs: 0 };
+    }
+
+    try {
+      if (path_b) {
+        // Diff two files using system diff
+        const absB = path_b.startsWith("/") ? path_b : join(ctx.workingDirectory, path_b);
+        if (!existsSync(absB)) {
+          return { callId: call.id, name: this.name, output: `File not found: ${absB}`, isError: true, durationMs: 0 };
+        }
+
+        const proc = Bun.spawn(["diff", "-u", "--label", path_a, "--label", path_b, absA, absB], {
+          stdout: "pipe",
+          stderr: "pipe",
+        });
+        const stdout = await new Response(proc.stdout).text();
+        const exitCode = await proc.exited;
+
+        if (exitCode === 0) {
+          return { callId: call.id, name: this.name, output: "Files are identical.", isError: false, durationMs: 0 };
+        }
+
+        return { callId: call.id, name: this.name, output: stdout, isError: false, durationMs: 0 };
+      } else if (new_content !== undefined) {
+        // Diff file content vs new content using a temp approach
+        const oldContent = readFileSync(absA, "utf-8");
+        const oldLines = oldContent.split("\n");
+        const newLines = new_content.split("\n");
+
+        const diff = generateUnifiedDiff(path_a, oldLines, newLines);
+        if (!diff) {
+          return { callId: call.id, name: this.name, output: "No differences.", isError: false, durationMs: 0 };
+        }
+
+        return { callId: call.id, name: this.name, output: diff, isError: false, durationMs: 0 };
+      } else {
+        return { callId: call.id, name: this.name, output: "Provide either path_b or new_content.", isError: true, durationMs: 0 };
+      }
+    } catch (err: any) {
+      return { callId: call.id, name: this.name, output: `Diff error: ${err.message}`, isError: true, durationMs: 0 };
+    }
+  }
+}
+
+// ─── Patch Tool ─────────────────────────────────────────────────────────────
+
+export class PatchTool implements Tool {
+  readonly name = "patch";
+  readonly description = `Apply a multi-edit patch to a file. Each edit specifies old_str to find and new_str to replace it with. All edits are validated before any are applied (atomic). More efficient than multiple edit_file calls.`;
+
+  readonly inputSchema = {
+    type: "object",
+    properties: {
+      path: { type: "string", description: "Path to the file to patch." },
+      edits: {
+        type: "array",
+        description: "Array of edits to apply.",
+        items: {
+          type: "object",
+          properties: {
+            old_str: { type: "string", description: "Exact string to find." },
+            new_str: { type: "string", description: "Replacement string." },
+          },
+          required: ["old_str", "new_str"],
+        },
+      },
+    },
+    required: ["path", "edits"],
+  };
+
+  async run(ctx: ToolContext, call: ToolCallInput): Promise<ToolCallOutput> {
+    const { path: filePath, edits } = call.input as {
+      path: string;
+      edits: Array<{ old_str: string; new_str: string }>;
+    };
+
+    const absPath = filePath.startsWith("/") ? filePath : join(ctx.workingDirectory, filePath);
+
+    if (!existsSync(absPath)) {
+      return { callId: call.id, name: this.name, output: `File not found: ${absPath}`, isError: true, durationMs: 0 };
+    }
+
+    if (!edits || edits.length === 0) {
+      return { callId: call.id, name: this.name, output: "No edits provided.", isError: true, durationMs: 0 };
+    }
+
+    try {
+      let content = readFileSync(absPath, "utf-8");
+
+      // Validate all edits first (atomic check)
+      for (let i = 0; i < edits.length; i++) {
+        const occurrences = content.split(edits[i].old_str).length - 1;
+        if (occurrences === 0) {
+          return { callId: call.id, name: this.name, output: `Edit ${i + 1}: old_str not found in ${absPath}`, isError: true, durationMs: 0 };
+        }
+        if (occurrences > 1) {
+          return { callId: call.id, name: this.name, output: `Edit ${i + 1}: old_str found ${occurrences} times. Must be unique.`, isError: true, durationMs: 0 };
+        }
+      }
+
+      // Apply all edits
+      for (const edit of edits) {
+        content = content.replace(edit.old_str, edit.new_str);
+      }
+
+      writeFileSync(absPath, content, "utf-8");
+      return {
+        callId: call.id,
+        name: this.name,
+        output: `Applied ${edits.length} edit(s) to ${absPath}`,
+        isError: false,
+        durationMs: 0,
+      };
+    } catch (err: any) {
+      return { callId: call.id, name: this.name, output: `Patch error: ${err.message}`, isError: true, durationMs: 0 };
+    }
+  }
+}
+
+// ─── Unified Diff Helper ────────────────────────────────────────────────────
+
+function generateUnifiedDiff(fileName: string, oldLines: string[], newLines: string[]): string | null {
+  // Simple line-by-line diff using LCS-based approach
+  const hunks: string[] = [];
+  hunks.push(`--- a/${fileName}`);
+  hunks.push(`+++ b/${fileName}`);
+
+  let hasChanges = false;
+  let i = 0, j = 0;
+
+  while (i < oldLines.length || j < newLines.length) {
+    if (i < oldLines.length && j < newLines.length && oldLines[i] === newLines[j]) {
+      i++;
+      j++;
+      continue;
+    }
+
+    // Found a difference — build a hunk with context
+    const contextStart = Math.max(0, i - 3);
+    let oldEnd = i;
+    let newEnd = j;
+
+    // Scan ahead to find the end of the changed region
+    while (oldEnd < oldLines.length || newEnd < newLines.length) {
+      if (oldEnd < oldLines.length && newEnd < newLines.length && oldLines[oldEnd] === newLines[newEnd]) {
+        // Check if we have enough matching lines to end the hunk
+        let matchCount = 0;
+        while (
+          oldEnd + matchCount < oldLines.length &&
+          newEnd + matchCount < newLines.length &&
+          oldLines[oldEnd + matchCount] === newLines[newEnd + matchCount]
+        ) {
+          matchCount++;
+          if (matchCount >= 6) break;
+        }
+        if (matchCount >= 6) break;
+        oldEnd += matchCount || 1;
+        newEnd += matchCount || 1;
+      } else if (oldEnd < oldLines.length && (newEnd >= newLines.length || oldLines[oldEnd] !== newLines[newEnd])) {
+        oldEnd++;
+      } else {
+        newEnd++;
+      }
+    }
+
+    const contextEnd = Math.min(Math.max(oldEnd, newEnd) + 3, Math.max(oldLines.length, newLines.length));
+    const oldContextEnd = Math.min(oldEnd + 3, oldLines.length);
+    const newContextEnd = Math.min(newEnd + 3, newLines.length);
+
+    hunks.push(`@@ -${contextStart + 1},${oldContextEnd - contextStart} +${contextStart + 1},${newContextEnd - contextStart} @@`);
+
+    // Context before
+    for (let c = contextStart; c < i; c++) {
+      hunks.push(` ${oldLines[c]}`);
+    }
+
+    // Changed lines
+    for (let c = i; c < oldEnd; c++) {
+      hunks.push(`-${oldLines[c]}`);
+      hasChanges = true;
+    }
+    for (let c = j; c < newEnd; c++) {
+      hunks.push(`+${newLines[c]}`);
+      hasChanges = true;
+    }
+
+    // Context after
+    for (let c = oldEnd; c < oldContextEnd; c++) {
+      hunks.push(` ${oldLines[c]}`);
+    }
+
+    i = oldContextEnd;
+    j = newContextEnd;
+  }
+
+  return hasChanges ? hunks.join("\n") : null;
 }

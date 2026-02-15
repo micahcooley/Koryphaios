@@ -1,3 +1,4 @@
+import { providerLog } from "../logger";
 // Provider Registry — the universal auth hub.
 // Auto-detects API keys from environment variables, config files, and CLI auth tokens.
 // Mirrors OpenCode's provider initialization order and env var conventions.
@@ -92,6 +93,50 @@ export class ProviderRegistry {
     return this.findProviderForModel(modelId);
   }
 
+  /** Set/update an API key at runtime — re-initializes the provider. */
+  setApiKey(name: ProviderName, apiKey: string, baseUrl?: string): { success: boolean; error?: string } {
+    try {
+      const existing = this.providerConfigs.get(name);
+      const providerConfig: ProviderConfig = {
+        name,
+        apiKey,
+        baseUrl: baseUrl ?? existing?.baseUrl,
+        disabled: false,
+        headers: existing?.headers,
+      };
+
+      this.providerConfigs.set(name, providerConfig);
+
+      // Re-create the provider instance
+      const provider = this.createProvider(name, providerConfig);
+      if (provider) {
+        this.providers.set(name, provider);
+        providerLog.info({ provider: name }, "Configured with new API key");
+        return { success: true };
+      }
+      return { success: false, error: "Failed to initialize provider" };
+    } catch (err: any) {
+      return { success: false, error: err.message };
+    }
+  }
+
+  /** Remove a provider's API key. */
+  removeApiKey(name: ProviderName): void {
+    const config = this.providerConfigs.get(name);
+    if (config) {
+      config.apiKey = undefined;
+      config.disabled = true;
+      this.providerConfigs.set(name, config);
+    }
+    this.providers.delete(name);
+    providerLog.info({ provider: name }, "Disconnected");
+  }
+
+  /** Get the env var name expected for a provider. */
+  getExpectedEnvVar(name: ProviderName): string {
+    return ENV_KEY_MAP[name]?.[0] ?? `${name.toUpperCase()}_API_KEY`;
+  }
+
   // ─── Private: Initialize all providers ──────────────────────────────────
 
   private initializeAll() {
@@ -123,7 +168,7 @@ export class ProviderRegistry {
           this.providers.set(name, provider);
         }
       } catch (err) {
-        console.warn(`[ProviderRegistry] Failed to initialize ${name}:`, err);
+        providerLog.warn({ provider: name, err }, "Failed to initialize");
       }
     }
 
@@ -185,10 +230,10 @@ export class ProviderRegistry {
   private logProviderStatus() {
     const available = this.getAvailable();
     const names = available.map((p) => p.name);
-    console.log(`[Koryphaios] Providers ready: ${names.length > 0 ? names.join(", ") : "none"}`);
+    providerLog.info({ providers: names }, "Providers ready");
 
     if (names.length === 0) {
-      console.warn("[Koryphaios] ⚠ No providers configured. Set API keys in env or config.");
+      providerLog.warn("No providers configured");
     }
   }
 }

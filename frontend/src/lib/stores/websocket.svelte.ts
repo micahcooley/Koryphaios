@@ -1,5 +1,5 @@
 // WebSocket connection store — Svelte 5 runes for reactive agent state.
-// Handles connection, reconnection, and message routing.
+// Handles connection, reconnection, message routing, user messages, and permissions.
 
 import type {
   WSMessage,
@@ -10,12 +10,17 @@ import type {
   StreamThinkingPayload,
   StreamToolCallPayload,
   StreamToolResultPayload,
+  StreamFileDeltaPayload,
+  StreamFileCompletePayload,
   KoryThoughtPayload,
   KoryRoutingPayload,
   ProviderStatusPayload,
   AgentSpawnedPayload,
   AgentStatusPayload,
+  PermissionRequest,
+  Session,
 } from "@koryphaios/shared";
+import { sessionStore } from './sessions.svelte';
 
 // ─── Agent State ────────────────────────────────────────────────────────────
 
@@ -26,6 +31,8 @@ interface AgentState {
   thinking: string;
   toolCalls: Array<{ name: string; status: string }>;
   task: string;
+  tokensUsed: number;
+  contextMax: number;
 }
 
 // ─── Feed Entry ─────────────────────────────────────────────────────────────
@@ -33,7 +40,7 @@ interface AgentState {
 export interface FeedEntry {
   id: string;
   timestamp: number;
-  type: "thought" | "content" | "thinking" | "tool_call" | "tool_result" | "routing" | "error" | "system";
+  type: "user_message" | "thought" | "content" | "thinking" | "tool_call" | "tool_result" | "routing" | "error" | "system";
   agentId: string;
   agentName: string;
   glowClass: string;
@@ -41,7 +48,7 @@ export interface FeedEntry {
   metadata?: Record<string, unknown>;
 }
 
-// ─── Reactive State (Svelte 5 Runes) ───────────────────────────────────────
+// ─── Reactive State (Svelte 5 Runes) ─────────────────────────────────────
 
 let wsConnection = $state<WebSocket | null>(null);
 let connectionStatus = $state<"connecting" | "connected" | "disconnected" | "error">("disconnected");
@@ -50,11 +57,22 @@ let feed = $state<FeedEntry[]>([]);
 let providers = $state<ProviderStatusPayload["providers"]>([]);
 let koryThought = $state<string>("");
 let koryPhase = $state<string>("");
+let pendingPermissions = $state<PermissionRequest[]>([]);
+
+// File edit streaming state (Cursor-style live preview)
+interface ActiveFileEdit {
+  path: string;
+  content: string;
+  operation: "create" | "edit";
+  agentId: string;
+  startedAt: number;
+}
+let activeFileEdits = $state<Map<string, ActiveFileEdit>>(new Map());
 
 const MAX_FEED_ENTRIES = 2000;
 let feedIdCounter = 0;
 
-// ─── Glow class resolver ────────────────────────────────────────────────────
+// ─── Glow class resolver ───────────────────────────────────────────────────
 
 function resolveGlowClass(agent?: AgentIdentity): string {
   if (!agent) return "";
@@ -75,7 +93,21 @@ function addFeedEntry(entry: Omit<FeedEntry, "id">) {
   feed = [...feed, newEntry].slice(-MAX_FEED_ENTRIES);
 }
 
-// ─── Message Handler ────────────────────────────────────────────────────────
+function addUserMessage(sessionId: string, content: string) {
+  const userEntry: FeedEntry = {
+    id: `user-${++feedIdCounter}`,
+    timestamp: Date.now(),
+    type: "user_message",
+    agentId: "user",
+    agentName: "You",
+    glowClass: "",
+    text: content,
+    metadata: { sessionId },
+  };
+  feed = [...feed, userEntry].slice(-MAX_FEED_ENTRIES);
+}
+
+// ─── Message Handler ───────────────────────────────────────────────────────
 
 function handleMessage(msg: WSMessage) {
   switch (msg.type) {
@@ -88,6 +120,8 @@ function handleMessage(msg: WSMessage) {
         thinking: "",
         toolCalls: [],
         task: p.task,
+        tokensUsed: 0,
+        contextMax: 128000,
       });
       agents = new Map(agents);
       addFeedEntry({
@@ -209,6 +243,35 @@ function handleMessage(msg: WSMessage) {
       break;
     }
 
+    case "stream.file_delta": {
+      const p = msg.payload as StreamFileDeltaPayload;
+      const existing = activeFileEdits.get(p.path);
+      if (existing) {
+        existing.content += p.delta;
+        activeFileEdits = new Map(activeFileEdits);
+      } else {
+        activeFileEdits.set(p.path, {
+          path: p.path,
+          content: p.delta,
+          operation: p.operation,
+          agentId: p.agentId,
+          startedAt: Date.now(),
+        });
+        activeFileEdits = new Map(activeFileEdits);
+      }
+      break;
+    }
+
+    case "stream.file_complete": {
+      const p = msg.payload as StreamFileCompletePayload;
+      // Keep the completed edit visible briefly, then remove
+      setTimeout(() => {
+        activeFileEdits.delete(p.path);
+        activeFileEdits = new Map(activeFileEdits);
+      }, 2000);
+      break;
+    }
+
     case "kory.thought": {
       const p = msg.payload as KoryThoughtPayload;
       koryThought = p.thought;
@@ -245,6 +308,30 @@ function handleMessage(msg: WSMessage) {
       break;
     }
 
+    case "session.updated": {
+      const p = msg.payload as { session: Session };
+      if (p.session) sessionStore.handleSessionUpdate(p.session);
+      break;
+    }
+
+    case "session.deleted": {
+      const p = msg.payload as { sessionId: string };
+      if (p.sessionId) sessionStore.handleSessionDeleted(p.sessionId);
+      break;
+    }
+
+    case "permission.request": {
+      const p = msg.payload as PermissionRequest;
+      pendingPermissions = [...pendingPermissions, p];
+      break;
+    }
+
+    case "permission.response": {
+      const p = msg.payload as { id: string; response: string };
+      pendingPermissions = pendingPermissions.filter(perm => perm.id !== p.id);
+      break;
+    }
+
     case "system.error": {
       const p = msg.payload as any;
       addFeedEntry({
@@ -278,16 +365,13 @@ function connect(url?: string) {
       connectionStatus = "connected";
       reconnectAttempts = 0;
       wsConnection = ws;
-      console.log("[WS] Connected to Koryphaios backend");
     };
 
     ws.onmessage = (event) => {
       try {
         const msg = JSON.parse(event.data) as WSMessage;
         handleMessage(msg);
-      } catch (err) {
-        console.warn("[WS] Failed to parse message:", err);
-      }
+      } catch {}
     };
 
     ws.onclose = () => {
@@ -320,11 +404,23 @@ function disconnect() {
 }
 
 function sendMessage(sessionId: string, content: string) {
+  addUserMessage(sessionId, content);
   fetch("/api/messages", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ sessionId, content }),
-  }).catch(console.error);
+  }).catch(() => {});
+}
+
+function respondToPermission(id: string, approved: boolean) {
+  if (wsConnection?.readyState === WebSocket.OPEN) {
+    wsConnection.send(JSON.stringify({
+      type: "permission.response",
+      payload: { id, response: approved ? "granted" : "denied" },
+      timestamp: Date.now(),
+    }));
+  }
+  pendingPermissions = pendingPermissions.filter(perm => perm.id !== id);
 }
 
 // ─── Exported Store ─────────────────────────────────────────────────────────
@@ -337,8 +433,11 @@ export const wsStore = {
   get providers() { return providers; },
   get koryThought() { return koryThought; },
   get koryPhase() { return koryPhase; },
+  get pendingPermissions() { return pendingPermissions; },
+  get activeFileEdits() { return activeFileEdits; },
   connect,
   disconnect,
   sendMessage,
+  respondToPermission,
   clearFeed() { feed = []; },
 };

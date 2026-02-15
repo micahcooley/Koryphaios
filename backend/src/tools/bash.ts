@@ -1,7 +1,9 @@
-// Bash tool — execute shell commands with streaming output.
-// Ported from OpenCode's tools/bash.go. Uses Bun's spawn for process execution.
+// Bash tool — execute shell commands with security sandboxing.
+// Uses Bun's spawn for process execution with command validation.
 
 import type { Tool, ToolContext, ToolCallInput, ToolCallOutput } from "./registry";
+import { validateBashCommand } from "../security";
+import { toolLog } from "../logger";
 
 const MAX_OUTPUT_BYTES = 512_000; // 512KB output limit per command
 
@@ -14,7 +16,7 @@ Guidelines:
 - Use non-interactive flags where available.
 - Prefer commands that produce structured output (JSON, etc.) when possible.
 - For long-running commands, the output will be truncated at ${MAX_OUTPUT_BYTES} bytes.
-- Commands run with the user's full shell environment and PATH.`;
+- Destructive system commands (rm -rf /, sudo, etc.) are blocked.`;
 
   readonly inputSchema = {
     type: "object",
@@ -42,8 +44,23 @@ Guidelines:
       timeout?: number;
     };
 
+    // Security: Validate command before execution
+    const validation = validateBashCommand(command);
+    if (!validation.safe) {
+      toolLog.warn({ command: command.slice(0, 100), reason: validation.reason }, "Blocked dangerous command");
+      return {
+        callId: call.id,
+        name: this.name,
+        output: `Command blocked: ${validation.reason}`,
+        isError: true,
+        durationMs: 0,
+      };
+    }
+
     const cwd = workingDirectory ?? ctx.workingDirectory;
     const timeoutMs = (timeout ?? 120) * 1000;
+
+    toolLog.info({ command: command.slice(0, 200), cwd }, "Executing bash command");
 
     try {
       const proc = Bun.spawn(["bash", "-c", command], {

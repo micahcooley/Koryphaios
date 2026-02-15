@@ -3,6 +3,7 @@
 
 import { Bot, webhookCallback } from "grammy";
 import type { KoryManager } from "../kory/manager";
+import { telegramLog } from "../logger";
 
 export interface TelegramConfig {
   botToken: string;
@@ -27,32 +28,37 @@ export class TelegramBridge {
     // Identity lock — drop ALL messages not from admin
     this.bot.use(async (ctx, next) => {
       if (ctx.from?.id !== this.adminId) {
-        console.warn(`[Telegram] Blocked message from unauthorized user: ${ctx.from?.id}`);
+        telegramLog.warn({ userId: ctx.from?.id }, "Blocked unauthorized user");
         return; // Silent drop
       }
       await next();
     });
 
-    // /vibe [prompt] — send a goal to Kory
-    this.bot.command("vibe", async (ctx) => {
+    // /task [prompt] — send a task to Kory
+    this.bot.command("task", async (ctx) => {
       const prompt = ctx.match;
       if (!prompt) {
-        await ctx.reply("Usage: /vibe <your prompt here>");
+        await ctx.reply("Usage: /task <your request here>");
         return;
       }
 
-      await ctx.reply(`🎯 Received vibe. Routing to Kory...\n\n"${prompt.slice(0, 200)}"`);
+      await ctx.reply(`🎯 Received task. Routing to Kory...\n\n"${prompt.slice(0, 200)}"`);
 
       try {
         // Fire and forget — Kory processes async, status available via /status
         const sessionId = `telegram-${Date.now()}`;
-        this.kory.processVibe(sessionId, prompt).catch((err) => {
-          console.error("[Telegram] Kory error:", err);
+        this.kory.processTask(sessionId, prompt).catch((err) => {
+          telegramLog.error(err, "Kory error from Telegram");
         });
         await ctx.reply("✅ Task dispatched. Use /status to check progress.");
       } catch (err: any) {
         await ctx.reply(`❌ Error: ${err.message}`);
       }
+    });
+
+    // Backwards compatibility - alias /vibe to /task
+    this.bot.command("vibe", async (ctx) => {
+      await ctx.reply("The /vibe command is deprecated. Use /task instead.");
     });
 
     // /status — get current agent activity
@@ -77,14 +83,14 @@ export class TelegramBridge {
       await ctx.reply("🛑 All active tasks cancelled.");
     });
 
-    // Handle plain text as vibe
+    // Handle plain text as a task
     this.bot.on("message:text", async (ctx) => {
       const text = ctx.message.text;
       if (text.startsWith("/")) return;
 
       await ctx.reply(`🎯 Processing: "${text.slice(0, 100)}..."`);
       const sessionId = `telegram-${Date.now()}`;
-      this.kory.processVibe(sessionId, text).catch(console.error);
+      this.kory.processTask(sessionId, text).catch((err) => telegramLog.error(err, "Kory task error from Telegram"));
     });
   }
 
@@ -97,12 +103,6 @@ export class TelegramBridge {
 
   /** Start polling mode (for development). */
   async startPolling() {
-    console.log("[Telegram] Starting bot in polling mode...");
     await this.bot.start();
-  }
-
-  /** Stop the bot. */
-  async stop() {
-    await this.bot.stop();
   }
 }
