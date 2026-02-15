@@ -112,23 +112,30 @@ export class ProviderRegistry {
       const isClaudeCodeCLI = config?.authToken?.startsWith("cli:claude");
       const isAuthenticated = isProviderAvailable || 
         (pn === "anthropic" && (!!detectClaudeCodeToken() || isClaudeCodeCLI)) ||
+        (pn === "claude-code" && (!!detectClaudeCodeToken() || isClaudeCodeCLI)) ||
         (pn === "copilot" && !!detectCopilotToken());
       
       // Only show models if the provider is enabled AND authenticated
       let allModels: string[] = [];
       if (isEnabled && isAuthenticated) {
+        const modelProviderId = pn === "claude-code" ? "anthropic" : pn;
         allModels = provider?.listModels().map((m) => m.id) 
-          ?? getModelsForProvider(pn).map((m) => m.id);
+          ?? getModelsForProvider(modelProviderId).map((m) => m.id);
       }
       
       const selectedModels = config?.selectedModels ?? [];
       const hideModelSelector = config?.hideModelSelector ?? false;
 
       // Special case for Claude Code: only show modern flagship models
-      const isClaudeCodeAuth = config?.authToken?.startsWith("cli:claude") || detectClaudeCodeToken() !== null;
-      if (pn === "anthropic" && isClaudeCodeAuth) {
+      if (pn === "claude-code") {
         const flagshipModels = ["claude-opus-4-6", "claude-sonnet-4-5", "claude-haiku-4-5"];
         allModels = allModels.filter(id => flagshipModels.includes(id));
+      } else if (pn === "anthropic") {
+        const isClaudeCodeAuth = config?.authToken?.startsWith("cli:claude") || detectClaudeCodeToken() !== null;
+        if (isClaudeCodeAuth) {
+          const flagshipModels = ["claude-opus-4-6", "claude-sonnet-4-5", "claude-haiku-4-5"];
+          allModels = allModels.filter(id => flagshipModels.includes(id));
+        }
       }
 
       // The 'models' field returned to UI should only be the ENABLED ones
