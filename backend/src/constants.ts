@@ -50,7 +50,7 @@ export const SERVER = {
   /** Default HTTP port */
   DEFAULT_PORT: 3000,
   /** Default host */
-  DEFAULT_HOST: "localhost",
+  DEFAULT_HOST: "0.0.0.0",
   /** WebSocket path */
   WS_PATH: "/ws",
   /** SSE path */
@@ -201,4 +201,49 @@ export const TIMEOUT = {
   AGENT_RESPONSE_MS: 600_000, // 10 minutes
   /** Provider API timeout */
   PROVIDER_API_MS: 120_000, // 2 minutes
+} as const;
+
+/**
+ * Worker Domain Configuration
+ */
+export const DOMAIN = {
+  KEYWORDS: {
+    ui: [
+      "skia", "flutter", "ui", "widget", "button", "layout", "css", "style",
+      "animation", "render", "frontend", "component", "svelte", "react", "view",
+      "canvas", "draw", "paint", "theme", "color", "font", "icon", "design",
+      "responsive", "mobile", "dark mode", "light mode", "sidebar", "modal",
+    ],
+    backend: [
+      "c++", "cpp", "cmake", "makefile", "gtest", "boost", "llvm", "clang",
+      "server", "api", "database", "sql", "grpc", "protobuf", "socket",
+      "memory", "pointer", "thread", "mutex", "algorithm", "data structure",
+      "compiler", "linker", "binary", "build", "performance", "optimization",
+      "kernel", "driver", "system", "dsp", "audio", "midi", "signal",
+    ],
+    general: [
+      "refactor", "rename", "move", "organize", "clean", "lint", "format",
+      "documentation", "readme", "comment", "explain", "review", "improve",
+      "typescript", "javascript", "python", "rust", "go",
+    ],
+    review: ["review", "audit", "check", "verify", "validate"],
+    test: ["test", "spec", "gtest", "jest", "vitest", "mocha", "pytest"],
+    critic: ["critic", "critique", "audit", "review", "gate", "quality"],
+  },
+  DEFAULT_MODELS: {
+    ui: "gpt-4.1",
+    backend: "gemini-2.5-pro",
+    general: "gemini-2.5-flash",
+    review: "gpt-4.1",
+    test: "gpt-4.1",
+    critic: "claude-sonnet-4-5",
+  },
+  GLOW_COLORS: {
+    ui: "rgba(0,255,255,0.5)",       // Cyan
+    backend: "rgba(128,0,128,0.5)",  // Deep Purple
+    general: "rgba(255,165,0,0.5)",  // Orange (Claude)
+    review: "rgba(255,165,0,0.5)",   // Orange
+    test: "rgba(0,255,128,0.5)",     // Green
+    critic: "rgba(255,0,0,0.6)",      // Red (Harshest)
+  },
 } as const;
