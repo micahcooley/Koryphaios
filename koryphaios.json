@@ -1,5 +1,4 @@
 {
-  "$schema": "./koryphaios-schema.json",
   "providers": {
     "anthropic": {
       "name": "anthropic",

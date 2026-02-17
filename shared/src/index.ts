@@ -10,6 +10,7 @@ export const ProviderName = {
   XAI: "xai",
   // Aggregators
   OpenRouter: "openrouter",
+  Cline: "cline",
   Groq: "groq",
   Copilot: "copilot",
   // Enterprise

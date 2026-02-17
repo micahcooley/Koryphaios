@@ -1,7 +1,8 @@
 // Koryphaios Backend Server — Bun HTTP + WebSocket server.
 // This is the main entry point that wires everything together.
 
-import type { WSMessage, APIResponse, SendMessageRequest, CreateSessionRequest, StoredMessage } from "@koryphaios/shared";
+import type { WSMessage, APIResponse, SendMessageRequest, CreateSessionRequest, StoredMessage, ProviderName } from "@koryphaios/shared";
+import type { ServerWebSocket } from "bun";
 import { ProviderRegistry } from "./providers";
 import { startCopilotDeviceAuth, pollCopilotDeviceAuth } from "./providers/copilot";
 import { ToolRegistry, BashTool, ReadFileTool, WriteFileTool, EditFileTool, GrepTool, GlobTool, LsTool, WebSearchTool, WebFetchTool, DeleteFileTool, MoveFileTool, DiffTool, PatchTool } from "./tools";
@@ -26,7 +27,8 @@ import { loadConfig } from "./runtime/config";
 import { persistEnvVar, clearEnvVar } from "./runtime/env";
 import { SessionStore } from "./stores/session-store";
 import { MessageStore } from "./stores/message-store";
-import { WSManager } from "./ws/ws-manager";
+import { WSManager, type WSClientData } from "./ws/ws-manager";
+import { normalizeClineAuthToken } from "./providers/cline";
 
 // ─── Configuration Loading ──────────────────────────────────────────────────
 
@@ -107,7 +109,9 @@ async function main() {
         if (done) break;
         wsManager.broadcast(value.payload);
       }
-    } catch {}
+    } catch (err) {
+      serverLog.error({ err }, "WebSocket pub/sub reader error");
+    }
   })();
 
   // Initialize Telegram bridge (optional)
@@ -127,6 +131,8 @@ async function main() {
   // ─── HTTP + WebSocket Server ────────────────────────────────────────────
 
   const rateLimiter = new RateLimiter(RATE_LIMIT.MAX_REQUESTS, RATE_LIMIT.WINDOW_MS);
+  const pendingAntigravityAuth = new Map<string, Promise<{ success: boolean; token?: string; error?: string }>>();
+  const pendingClineOAuth = new Map<string, { status: "pending" | "connected" | "error"; error?: string }>();
 
   const server = Bun.serve<{ id: string }>({
     port: config.server.port,
@@ -405,6 +411,136 @@ async function main() {
         }
       }
 
+      // Cline OAuth start flow (open browser URL + poll by authId)
+      if (url.pathname === "/api/providers/cline/oauth/start" && method === "POST") {
+        try {
+          const authId = nanoid();
+          const callbackUrl = `${url.origin}/api/providers/cline/oauth/callback?authId=${encodeURIComponent(authId)}`;
+          const authorizeUrl = new URL("https://api.cline.bot/api/v1/auth/authorize");
+          authorizeUrl.searchParams.set("client_type", "extension");
+          authorizeUrl.searchParams.set("callback_url", callbackUrl);
+          authorizeUrl.searchParams.set("redirect_uri", callbackUrl);
+
+          const authResp = await fetch(authorizeUrl.toString(), {
+            method: "GET",
+            redirect: "manual",
+            headers: {
+              Accept: "application/json",
+              "Content-Type": "application/json",
+            },
+          });
+
+          let authUrl = authResp.headers.get("location") ?? "";
+          if (!authUrl) {
+            const body = await authResp.json().catch(() => ({} as any));
+            authUrl = body?.redirect_url ?? body?.data?.redirect_url ?? "";
+          }
+          if (!authUrl) {
+            return json({ ok: false, error: "Failed to resolve Cline OAuth URL" }, 400, corsHeaders);
+          }
+
+          pendingClineOAuth.set(authId, { status: "pending" });
+          setTimeout(() => pendingClineOAuth.delete(authId), 10 * 60_000);
+
+          return json({ ok: true, data: { authId, authUrl, expiresIn: 600 } }, 200, corsHeaders);
+        } catch (err: any) {
+          return json({ ok: false, error: err?.message ?? "Failed to start Cline auth" }, 500, corsHeaders);
+        }
+      }
+
+      // Cline OAuth completion poll
+      if (url.pathname === "/api/providers/cline/oauth/poll" && method === "GET") {
+        const authId = sanitizeString(url.searchParams.get("authId"), 128);
+        if (!authId) return json({ ok: false, error: "authId is required" }, 400, corsHeaders);
+        const state = pendingClineOAuth.get(authId);
+        if (!state) return json({ ok: false, error: "Invalid or expired auth session" }, 404, corsHeaders);
+        return json({ ok: true, data: state }, 200, corsHeaders);
+      }
+
+      // Cline OAuth callback (exchanges code, stores auth token, then closes popup)
+      if (url.pathname === "/api/providers/cline/oauth/callback" && method === "GET") {
+        const authId = sanitizeString(url.searchParams.get("authId"), 128);
+        const code = sanitizeString(url.searchParams.get("code"), 2000);
+        const provider = sanitizeString(url.searchParams.get("provider"), 128);
+        const authError = sanitizeString(url.searchParams.get("error"), 500);
+        const authErrorDescription = sanitizeString(url.searchParams.get("error_description"), 1000);
+
+        const closePage = (success: boolean, message: string) =>
+          new Response(
+            `<!doctype html><html><head><meta charset="utf-8"><title>Cline Auth</title></head><body style="font-family:sans-serif;padding:16px;">${message}<script>setTimeout(function(){window.close();}, ${success ? 300 : 1200});</script></body></html>`,
+            { status: success ? 200 : 400, headers: { "Content-Type": "text/html; charset=utf-8" } },
+          );
+
+        if (!authId || !pendingClineOAuth.has(authId)) {
+          return closePage(false, "This Cline auth session is invalid or expired.");
+        }
+
+        if (authError) {
+          pendingClineOAuth.set(authId, { status: "error", error: authErrorDescription || authError });
+          return closePage(false, `Cline authentication failed: ${authErrorDescription || authError}`);
+        }
+
+        if (!code) {
+          pendingClineOAuth.set(authId, { status: "error", error: "Missing authorization code" });
+          return closePage(false, "Cline authentication failed: missing authorization code.");
+        }
+
+        try {
+          const callbackUrl = `${url.origin}/api/providers/cline/oauth/callback?authId=${encodeURIComponent(authId)}`;
+          const tokenResp = await fetch("https://api.cline.bot/api/v1/auth/token", {
+            method: "POST",
+            headers: {
+              Accept: "application/json",
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              grant_type: "authorization_code",
+              code,
+              client_type: "extension",
+              redirect_uri: callbackUrl,
+              ...(provider ? { provider } : {}),
+            }),
+          });
+
+          const tokenJson = await tokenResp.json().catch(() => ({} as any));
+          const rawAccessToken = tokenJson?.data?.accessToken as string | undefined;
+          if (!tokenResp.ok || !rawAccessToken) {
+            const apiError = tokenJson?.error_description || tokenJson?.error || "Failed to exchange Cline auth code";
+            pendingClineOAuth.set(authId, { status: "error", error: apiError });
+            return closePage(false, `Cline authentication failed: ${apiError}`);
+          }
+
+          const authToken = normalizeClineAuthToken(rawAccessToken);
+          const result = providers.setCredentials("cline", { authToken });
+          if (!result.success) {
+            pendingClineOAuth.set(authId, { status: "error", error: result.error ?? "Failed to store Cline credentials" });
+            return closePage(false, `Cline authentication failed: ${result.error ?? "Failed to store credentials"}`);
+          }
+
+          const verification = await providers.verifyConnection("cline", { authToken });
+          if (!verification.success) {
+            providers.removeApiKey("cline");
+            pendingClineOAuth.set(authId, { status: "error", error: verification.error ?? "Cline verification failed" });
+            return closePage(false, `Cline authentication failed: ${verification.error ?? "verification failed"}`);
+          }
+
+          persistEnvVar(PROJECT_ROOT, providers.getExpectedEnvVar("cline", "authToken"), encryptApiKey(authToken));
+          providers.refreshProvider("cline");
+
+          wsManager.broadcast({
+            type: "provider.status",
+            payload: { providers: await providers.getStatus() },
+            timestamp: Date.now(),
+          } satisfies WSMessage);
+
+          pendingClineOAuth.set(authId, { status: "connected" });
+          return closePage(true, "Cline authentication complete. You can close this window.");
+        } catch (err: any) {
+          pendingClineOAuth.set(authId, { status: "error", error: err?.message ?? "Cline auth callback failed" });
+          return closePage(false, `Cline authentication failed: ${err?.message ?? "callback error"}`);
+        }
+      }
+
       // Google/Gemini Auth Routes
       if (url.pathname === "/api/providers/google/auth/cli" && method === "POST") {
         try {
@@ -414,9 +550,6 @@ async function main() {
           return json({ ok: false, error: err.message }, 500, corsHeaders);
         }
       }
-
-      // In-memory store for pending auth sessions
-      const pendingAntigravityAuth = new Map<string, Promise<{ success: boolean; token?: string; error?: string }>>();
 
       if (url.pathname === "/api/providers/google/auth/antigravity" && method === "POST") {
         try {
@@ -491,11 +624,11 @@ async function main() {
         // Handle special CLI auth modes (codex, gemini cli, antigravity, claude code)
         if (authMode === "codex" || authMode === "cli" || authMode === "antigravity" || authMode === "claude_code") {
           const cliName = authMode === "codex" ? "codex" : authMode === "claude_code" ? "claude" : "gemini";
-          const targetProvider =
+          const targetProvider = (
             authMode === "codex" ? "codex" :
             authMode === "claude_code" ? "anthropic" :
-            // For unified Google card, store CLI auth directly on the canonical google provider
-            "google";
+            "google"
+          ) as ProviderName;
 
           // Verify CLI is installed and accessible
           const whichProc = Bun.spawnSync(["which", cliName], { stdout: "pipe", stderr: "pipe" });
@@ -506,7 +639,7 @@ async function main() {
           // Mark provider as CLI-authenticated temporarily to verify
           const authValue = authMode === "antigravity" ? "cli:antigravity" : `cli:${cliName}`;
           
-          const verification = await providers.verifyConnection(targetProvider as any, {
+          const verification = await providers.verifyConnection(targetProvider, {
             authToken: authValue
           });
 
@@ -515,7 +648,7 @@ async function main() {
           }
 
           // Verification passed, set and persist
-          const result = providers.setCredentials(targetProvider as any, {
+          const result = providers.setCredentials(targetProvider, {
             authToken: authValue,
           });
           
@@ -525,7 +658,7 @@ async function main() {
 
           persistEnvVar(
             PROJECT_ROOT,
-            providers.getExpectedEnvVar(targetProvider as any, "authToken"),
+            providers.getExpectedEnvVar(targetProvider, "authToken"),
             authValue,
           );
 
@@ -544,7 +677,7 @@ async function main() {
           !baseUrl &&
           (body.selectedModels !== undefined || body.hideModelSelector !== undefined);
 
-        const result = providers.setCredentials(providerName as any, {
+        const result = providers.setCredentials(providerName, {
           ...(apiKey && { apiKey }),
           ...(authToken && { authToken }),
           ...(baseUrl && { baseUrl }),
@@ -556,25 +689,25 @@ async function main() {
         }
 
         if (!isPreferencesOnlyUpdate) {
-          const verification = await providers.verifyConnection(providerName as any, {
+          const verification = await providers.verifyConnection(providerName, {
             ...(apiKey && { apiKey }),
             ...(authToken && { authToken }),
             ...(baseUrl && { baseUrl }),
           });
           if (!verification.success) {
-            providers.removeApiKey(providerName as any);
+            providers.removeApiKey(providerName);
             return json({ ok: false, error: verification.error ?? "Provider verification failed" }, 400, corsHeaders);
           }
         }
 
         if (apiKey) {
-          persistEnvVar(PROJECT_ROOT, providers.getExpectedEnvVar(providerName as any, "apiKey"), encryptApiKey(apiKey));
+          persistEnvVar(PROJECT_ROOT, providers.getExpectedEnvVar(providerName, "apiKey"), encryptApiKey(apiKey));
         }
         if (authToken) {
-          persistEnvVar(PROJECT_ROOT, providers.getExpectedEnvVar(providerName as any, "authToken"), encryptApiKey(authToken));
+          persistEnvVar(PROJECT_ROOT, providers.getExpectedEnvVar(providerName, "authToken"), encryptApiKey(authToken));
         }
         if (baseUrl) {
-          persistEnvVar(PROJECT_ROOT, providers.getExpectedEnvVar(providerName as any, "baseUrl"), baseUrl);
+          persistEnvVar(PROJECT_ROOT, providers.getExpectedEnvVar(providerName, "baseUrl"), baseUrl);
         }
 
         // Broadcast updated provider status via WebSocket
@@ -633,8 +766,7 @@ async function main() {
 
       // Branches
       if (url.pathname === "/api/git/branches" && method === "GET") {
-        const { output } = (kory.git as any).runGit(["branch", "--format=%(refname:short)"]);
-        const branches = output.split("\n").filter(Boolean);
+        const branches = await kory.git.getBranches();
         return json({ ok: true, data: { branches } }, 200, corsHeaders);
       }
 
@@ -707,19 +839,19 @@ async function main() {
         if (!providerName) {
           return json({ ok: false, error: "Invalid provider name" }, 400, corsHeaders);
         }
-        providers.removeApiKey(providerName as any);
-        clearEnvVar(PROJECT_ROOT, providers.getExpectedEnvVar(providerName as any, "apiKey"));
-        clearEnvVar(PROJECT_ROOT, providers.getExpectedEnvVar(providerName as any, "authToken"));
-        clearEnvVar(PROJECT_ROOT, providers.getExpectedEnvVar(providerName as any, "baseUrl"));
+        providers.removeApiKey(providerName);
+        clearEnvVar(PROJECT_ROOT, providers.getExpectedEnvVar(providerName, "apiKey"));
+        clearEnvVar(PROJECT_ROOT, providers.getExpectedEnvVar(providerName, "authToken"));
+        clearEnvVar(PROJECT_ROOT, providers.getExpectedEnvVar(providerName, "baseUrl"));
 
         // Persist provider disconnect state so auto-detected CLI/env auth does not
         // immediately re-enable on next restart unless user explicitly reconnects.
         try {
           config.providers = config.providers ?? {};
-          const existing = config.providers[providerName as keyof typeof config.providers] ?? { name: providerName as any };
+          const existing = config.providers[providerName as keyof typeof config.providers] ?? { name: providerName };
           config.providers[providerName as keyof typeof config.providers] = {
             ...existing,
-            name: providerName as any,
+            name: providerName,
             apiKey: undefined,
             authToken: undefined,
             baseUrl: undefined,
@@ -779,12 +911,12 @@ async function main() {
 
       // SSE endpoint for clients that don't support WebSocket
       if (url.pathname === "/api/events") {
+        const abortController = new AbortController();
+        const sub = wsBroker.subscribe(abortController.signal);
+        const reader = sub.getReader();
         const stream = new ReadableStream({
           start(controller) {
             const encoder = new TextEncoder();
-            const sub = wsBroker.subscribe();
-            const reader = sub.getReader();
-
             (async () => {
               try {
                 while (true) {
@@ -794,9 +926,15 @@ async function main() {
                   controller.enqueue(encoder.encode(data));
                 }
               } catch {
+                // Client disconnected or stream closed
+              } finally {
                 controller.close();
               }
             })();
+          },
+          cancel() {
+            abortController.abort();
+            reader.cancel().catch(() => {});
           },
         });
 
@@ -828,7 +966,7 @@ async function main() {
     },
 
     websocket: {
-      open(ws: any) {
+      open(ws: ServerWebSocket<WSClientData>) {
         try {
           wsManager.add(ws);
           serverLog.info({ clientId: ws.data.id, clients: wsManager.clientCount }, "WS client connected");
@@ -850,7 +988,7 @@ async function main() {
         }
       },
 
-      message(ws: any, message: string | Buffer) {
+      message(ws: ServerWebSocket<WSClientData>, message: string | Buffer) {
         try {
           const msg = JSON.parse(String(message));
 
@@ -871,7 +1009,7 @@ async function main() {
         }
       },
 
-      close(ws: any) {
+      close(ws: ServerWebSocket<WSClientData>) {
         wsManager.remove(ws);
         serverLog.info({ clients: wsManager.clientCount }, "WS client disconnected");
       },
@@ -919,11 +1057,11 @@ async function main() {
       // 4. Wait a moment for final messages to send
       await new Promise(resolve => setTimeout(resolve, 1000));
 
-      // 5. Stop Telegram bot if running
-      if (telegram && typeof (telegram as any).stop === "function") {
-        (telegram as any).stop();
-        serverLog.info("Stopped Telegram bot");
-      }
+      // 5. Shut down pub/sub broker
+      wsBroker.shutdown();
+
+      // 6. Clean up rate limiter
+      rateLimiter.destroy();
 
       serverLog.info("Graceful shutdown complete");
       process.exit(0);

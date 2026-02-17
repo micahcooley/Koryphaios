@@ -38,15 +38,20 @@ for (const [domain, modelId] of Object.entries(DOMAIN.DEFAULT_MODELS)) {
 
 // ─── Kory Identity ──────────────────────────────────────────────────────────
 
-const KORY_IDENTITY: AgentIdentity = {
+let KORY_IDENTITY: AgentIdentity = {
   id: "kory-manager",
   name: "Kory",
   role: "manager",
-  model: "gpt-4.1",
+  model: "pending",
   provider: "copilot",
   domain: "general",
   glowColor: "rgba(255,215,0,0.6)", // Gold
 };
+
+function koryIdentityWithModel(model: string, provider: ProviderName): AgentIdentity {
+  KORY_IDENTITY = { ...KORY_IDENTITY, model, provider };
+  return KORY_IDENTITY;
+}
 
 // ─── System Prompts ──────────────────────────────────────────────────────────
 
@@ -277,7 +282,7 @@ export class KoryManager {
 
   private async routeToWorker(sessionId: string, userMessage: string, preferredModel?: string, reasoningLevel?: string, allowedPaths: string[] = []): Promise<boolean> {
     let domain: WorkerDomain;
-    try { domain = await this.classifyDomainLLM(userMessage, preferredModel); } catch { domain = "general"; }
+    try { domain = this.classifyDomainLLM(userMessage); } catch { domain = "general"; }
     const isSandboxed = !this.requiresSystemAccess(userMessage);
     
     if (this.git.isGitRepo()) {
@@ -352,17 +357,14 @@ export class KoryManager {
     } catch { return true; }
   }
 
-  private async classifyDomainLLM(m: string, preferredModel?: string): Promise<WorkerDomain> {
-    const routing = this.resolveActiveRouting(preferredModel, "general");
-    const provider = await this.providers.resolveProvider(routing.model, routing.provider);
-    if (!provider) return "general";
-
-    let res = "";
-    try {
-      for await (const event of provider.streamResponse({ model: routing.model, systemPrompt: "frontend, backend, test, review, or general?", messages: [{ role: "user", content: m }], maxTokens: 5 })) if (event.type === "content_delta") res += event.content;
-      const d = res.trim().toLowerCase() as WorkerDomain;
-      return ["frontend", "backend", "test", "review", "general"].includes(d) ? d : "general";
-    } catch { return "general"; }
+  private classifyDomainLLM(message: string): WorkerDomain {
+    const lower = message.toLowerCase();
+    const scores: Record<string, number> = {};
+    for (const [domain, keywords] of Object.entries(DOMAIN.KEYWORDS)) {
+      scores[domain] = (keywords as readonly string[]).filter(k => lower.includes(k)).length;
+    }
+    const best = Object.entries(scores).sort((a, b) => b[1] - a[1])[0];
+    return (best && best[1] > 0 ? best[0] : "general") as WorkerDomain;
   }
 
   private async handleDirectly(sessionId: string, userMessage: string, reasoningLevel?: string, preferredModel?: string): Promise<void> {
@@ -504,5 +506,5 @@ export class KoryManager {
     };
     this.emitWSMessage(sessionId, "stream.usage", payload);
   }
-  private emitWSMessage(sessionId: string, type: string, payload: any) { wsBroker.publish("custom", { type: type as any, payload, timestamp: Date.now(), sessionId, agentId: KORY_IDENTITY.id }); }
+  private emitWSMessage(sessionId: string, type: string, payload: WSMessage["payload"]) { wsBroker.publish("custom", { type: type as WSMessage["type"], payload, timestamp: Date.now(), sessionId, agentId: KORY_IDENTITY.id }); }
 }

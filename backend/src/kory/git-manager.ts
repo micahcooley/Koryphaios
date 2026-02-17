@@ -135,6 +135,11 @@ export class GitManager {
     return output.trim();
   }
 
+  async getBranches(): Promise<string[]> {
+    const { output } = this.runGit(["branch", "--format=%(refname:short)"]);
+    return output.split("\n").filter(Boolean);
+  }
+
   async checkout(branch: string, create = false): Promise<boolean> {
     const args = ["checkout"];
     if (create) args.push("-b");

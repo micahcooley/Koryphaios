@@ -50,6 +50,7 @@
       icon: Globe,
       providers: [
         { key: 'openrouter', label: 'OpenRouter', placeholder: 'sk-or-...' },
+        { key: 'cline', label: 'Cline', placeholder: 'OAuth account sign-in' },
         { key: 'copilot', label: 'GitHub Copilot', placeholder: 'gho_...' },
         { key: 'groq', label: 'Groq', placeholder: 'gsk_...' },
       ],
@@ -94,6 +95,10 @@
   let copilotAuthStatus = $state<'idle' | 'pending' | 'connected' | 'error'>('idle');
   let copilotAuthMessage = $state<string>('');
   let copilotPollTimer: ReturnType<typeof setTimeout> | null = null;
+  let clineOAuthSession = $state<{ authId: string; expiresAt: number } | null>(null);
+  let clineAuthStatus = $state<'idle' | 'pending' | 'connected' | 'error'>('idle');
+  let clineAuthMessage = $state<string>('');
+  let clinePollTimer: ReturnType<typeof setTimeout> | null = null;
 
   // Auth mode for providers with multiple auth options
   let selectedAuthMode = $state<Record<string, string>>({});
@@ -245,10 +250,24 @@
     }
   }
 
+  function stopClinePolling() {
+    if (clinePollTimer) {
+      clearTimeout(clinePollTimer);
+      clinePollTimer = null;
+    }
+  }
+
   function scheduleCopilotPoll(delayMs: number) {
     stopCopilotPolling();
     copilotPollTimer = setTimeout(() => {
       void completeCopilotAuth(false);
+    }, delayMs);
+  }
+
+  function scheduleClinePoll(delayMs: number) {
+    stopClinePolling();
+    clinePollTimer = setTimeout(() => {
+      void pollClineAuth(false);
     }, delayMs);
   }
 
@@ -366,8 +385,102 @@
     }
   }
 
+  async function startClineAuth() {
+    try {
+      stopClinePolling();
+      clineAuthStatus = 'pending';
+      clineAuthMessage = 'Opening Cline sign-in...';
+
+      const res = await fetch('/api/providers/cline/oauth/start', {
+        method: 'POST',
+      });
+      const data = await res.json();
+      if (!data.ok) {
+        clineAuthStatus = 'error';
+        clineAuthMessage = data.error ?? 'Failed to start Cline auth';
+        toastStore.error(clineAuthMessage);
+        return;
+      }
+
+      const payload = data.data as { authId: string; authUrl: string; expiresIn: number };
+      clineOAuthSession = {
+        authId: payload.authId,
+        expiresAt: Date.now() + Math.max(60, payload.expiresIn ?? 600) * 1000,
+      };
+      clineAuthStatus = 'pending';
+      clineAuthMessage = 'Waiting for Cline authorization...';
+
+      window.open(payload.authUrl, '_blank', 'noopener,noreferrer');
+      scheduleClinePoll(1200);
+    } catch (err: any) {
+      clineAuthStatus = 'error';
+      clineAuthMessage = err.message ?? 'Failed to start Cline auth';
+      toastStore.error(clineAuthMessage);
+    }
+  }
+
+  async function pollClineAuth(manual = true) {
+    if (!clineOAuthSession?.authId) {
+      if (manual) toastStore.error('Start Cline auth first');
+      return;
+    }
+    if (Date.now() > clineOAuthSession.expiresAt) {
+      stopClinePolling();
+      clineAuthStatus = 'error';
+      clineAuthMessage = 'Cline auth session expired. Start again.';
+      toastStore.error(clineAuthMessage);
+      return;
+    }
+
+    saving = 'cline';
+    try {
+      const res = await fetch(`/api/providers/cline/oauth/poll?authId=${encodeURIComponent(clineOAuthSession.authId)}`);
+      const data = await res.json();
+      if (!data.ok) {
+        clineAuthStatus = 'error';
+        clineAuthMessage = data.error ?? 'Cline auth failed';
+        stopClinePolling();
+        toastStore.error(clineAuthMessage);
+        return;
+      }
+
+      const status = data.data?.status as 'pending' | 'connected' | 'error' | undefined;
+      if (status === 'connected') {
+        stopClinePolling();
+        clineAuthStatus = 'connected';
+        clineAuthMessage = 'Authorized successfully.';
+        clineOAuthSession = null;
+        expandedProvider = null;
+        toastStore.success('cline connected');
+        return;
+      }
+      if (status === 'error') {
+        stopClinePolling();
+        clineAuthStatus = 'error';
+        clineAuthMessage = data.data?.error ?? 'Cline authentication failed';
+        toastStore.error(clineAuthMessage);
+        return;
+      }
+
+      clineAuthStatus = 'pending';
+      clineAuthMessage = 'Waiting for Cline authorization...';
+      scheduleClinePoll(1500);
+    } catch (err: any) {
+      if (manual) {
+        clineAuthStatus = 'error';
+        clineAuthMessage = err.message ?? 'Cline auth failed';
+        toastStore.error(clineAuthMessage);
+      } else {
+        scheduleClinePoll(1500);
+      }
+    } finally {
+      saving = null;
+    }
+  }
+
   onDestroy(() => {
     stopCopilotPolling();
+    stopClinePolling();
   });
 
   async function disconnectProvider(name: string) {
@@ -706,6 +819,25 @@
                               {saving === 'copilot' ? 'Checking...' : 'Complete Authorization'}
                             </button>
                           {/if}
+                        {:else if prov.key === 'cline'}
+                          <button
+                            onclick={startClineAuth}
+                            class="btn btn-secondary w-full"
+                          >
+                            Sign In with Cline
+                          </button>
+                          {#if clineOAuthSession}
+                            <div class="rounded-md px-2 py-2 mt-2" style="background: var(--color-surface-2);">
+                              <div class="text-[10px]" style="color: var(--color-text-muted);">{clineAuthMessage}</div>
+                            </div>
+                            <button
+                              onclick={() => pollClineAuth(true)}
+                              disabled={saving === 'cline'}
+                              class="btn btn-primary w-full"
+                            >
+                              {saving === 'cline' ? 'Checking...' : 'Check Authorization'}
+                            </button>
+                          {/if}
                         {:else if authPortalUrls[prov.key]}
                           <button
                             onclick={() => openAuthPortal(prov.key)}
@@ -729,7 +861,7 @@
                           Uses host environment auth ({prov.key === 'bedrock' ? 'AWS credentials/profile' : 'Vertex/Google credentials'}).
                         </div>
                       {/if}
-                      {#if !(caps.authMode === 'auth_only' && prov.key === 'copilot')}
+                      {#if !(caps.authMode === 'auth_only' && (prov.key === 'copilot' || prov.key === 'cline'))}
                         <button
                           onclick={() => connectProvider(prov.key)}
                           disabled={saving === prov.key}

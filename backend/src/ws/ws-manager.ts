@@ -1,21 +1,27 @@
+import type { ServerWebSocket } from "bun";
 import type { WSMessage } from "@koryphaios/shared";
 import { serverLog } from "../logger";
 
+export interface WSClientData {
+  id: string;
+  sessionId: string;
+}
+
 interface WSClient {
-  ws: any;
+  ws: ServerWebSocket<WSClientData>;
   subscribedSessions: Set<string>;
 }
 
 export class WSManager {
   private clients = new Map<string, WSClient>();
 
-  add(ws: any) {
+  add(ws: ServerWebSocket<WSClientData>) {
     const id = ws.data.id;
     this.clients.set(id, { ws, subscribedSessions: new Set() });
     serverLog.debug({ clientId: id, totalClients: this.clients.size }, "WebSocket client added");
   }
 
-  remove(ws: any) {
+  remove(ws: ServerWebSocket<WSClientData>) {
     const id = ws.data.id;
     this.clients.delete(id);
     serverLog.debug({ clientId: id, totalClients: this.clients.size }, "WebSocket client removed");
