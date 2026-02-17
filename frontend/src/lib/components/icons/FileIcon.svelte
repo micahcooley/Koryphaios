@@ -1,7 +1,6 @@
 <script lang="ts">
   import { 
     FileText, 
-    FileCode, 
     FileJson, 
     File, 
     Hash, 
@@ -11,14 +10,8 @@
     Database, 
     Lock,
     Image as ImageIcon,
-    Music,
-    Video,
     Box,
-    Globe,
-    Cpu,
-    Coffee,
     Type,
-    Table,
     Archive
   } from 'lucide-svelte';
 
@@ -33,135 +26,165 @@
   let extension = $derived(path.split('.').pop()?.toLowerCase() || "");
   let fileName = $derived(path.split('/').pop()?.toLowerCase() || "");
 
-  type IconTheme = {
-    type: 'badge' | 'icon';
-    label?: string;
-    icon?: any;
-    color: string;
-    textColor?: string;
+  const colors = {
+    typescript: '#3178c6',
+    javascript: '#f7df1e',
+    svelte: '#ff3e00',
+    python: '#3776ab',
+    go: '#00add8',
+    rust: '#dea584',
+    cpp: '#00599c',
+    c: '#a8b9cc',
+    java: '#b07219',
+    ruby: '#701516',
+    php: '#4f5d95',
+    swift: '#ffac45',
+    kotlin: '#7f52ff',
+    dart: '#00b4ab',
+    elixir: '#6e4a7e',
+    lua: '#000080',
+    csharp: '#178600',
+    zig: '#ec915c',
+    asm: '#6d6d6d',
+    html: '#e34c26',
+    css: '#264de4',
+    json: '#cbcb41',
+    markdown: '#000000', // Markdown official is often black or blue
+    git: '#f05032',
+    docker: '#2496ed',
+    node: '#83cd29',
+    shell: '#4ebd37',
+    yaml: '#cb171e',
+    toml: '#9c4221',
+    sql: '#336791',
+    xml: '#0060ac',
+    graphql: '#e10098',
+    image: '#ec915c'
   };
 
-  const getTheme = (ext: string, name: string): IconTheme => {
-    // ─── Exact Filename Matches ──────────────────────────────────────────────
-    if (name === 'dockerfile') return { type: 'icon', icon: Layers, color: '#2496ed' };
-    if (name === 'makefile') return { type: 'icon', icon: Terminal, color: '#4ebd37' };
-    if (name === 'gemfile') return { type: 'badge', label: 'GEM', color: '#701516' };
-    if (name === 'procfile') return { type: 'badge', label: 'PROC', color: '#7b42bc' };
-    if (name === 'jenkinsfile') return { type: 'badge', label: 'JENK', color: '#d33833' };
-    if (name.startsWith('.env')) return { type: 'icon', icon: Settings2, color: '#cbcb41' };
-    if (name.startsWith('.git')) return { type: 'icon', icon: Hash, color: '#f05032' };
-    if (name.includes('eslint')) return { type: 'badge', label: 'ES', color: '#4b32c3' };
-    if (name.includes('prettier')) return { type: 'badge', label: 'PR', color: '#f7b93e', textColor: '#000' };
-    if (name === 'package.json' || name === 'bun.lock' || name === 'yarn.lock' || name.includes('lock')) return { type: 'icon', icon: Lock, color: '#83cd29' };
-    if (name === 'license' || name === 'license.md' || name === 'license.txt') return { type: 'badge', label: 'LIC', color: '#d0d0d0', textColor: '#000' };
-    if (name === 'readme.md') return { type: 'icon', icon: FileText, color: '#3178c6' };
+  type IconType = 'ts' | 'tsx' | 'js' | 'jsx' | 'svelte' | 'py' | 'go' | 'rs' | 'cpp' | 'c' | 'java' | 'rb' | 'php' | 'swift' | 'kt' | 'dart' | 'ex' | 'lua' | 'cs' | 'zig' | 'asm' | 'html' | 'css' | 'json' | 'md' | 'git' | 'docker' | 'shell' | 'yaml' | 'toml' | 'sql' | 'xml' | 'gql' | 'node' | 'image' | 'default';
 
-    // ─── Extension Matches ───────────────────────────────────────────────────
+  const getType = (ext: string, name: string): IconType => {
+    if (name === 'dockerfile') return 'docker';
+    if (name.startsWith('.git')) return 'git';
+    if (name.startsWith('.env')) return 'shell';
+    if (name === 'package.json' || name.includes('lock')) return 'node';
+    if (name.toLowerCase().includes('makefile')) return 'shell';
+    
     switch (ext) {
-      // JavaScript / Web
-      case 'ts': return { type: 'badge', label: 'TS', color: '#3178c6' };
-      case 'tsx': return { type: 'badge', label: 'TSX', color: '#3178c6' };
-      case 'js': return { type: 'badge', label: 'JS', color: '#f7df1e', textColor: '#000' };
-      case 'jsx': return { type: 'badge', label: 'JSX', color: '#61dafb', textColor: '#000' };
-      case 'mjs': return { type: 'badge', label: 'JS', color: '#f7df1e', textColor: '#000' };
-      case 'cjs': return { type: 'badge', label: 'JS', color: '#f7df1e', textColor: '#000' };
-      case 'svelte': return { type: 'badge', label: 'S', color: '#ff3e00' };
-      case 'vue': return { type: 'badge', label: 'V', color: '#41b883' };
-      case 'astro': return { type: 'badge', label: 'A', color: '#ff5d01' };
-      case 'html': return { type: 'badge', label: '<>', color: '#e34c26' };
-      case 'css': return { type: 'badge', label: '#', color: '#264de4' };
-      case 'scss': return { type: 'badge', label: 'SASS', color: '#c6538c' };
-      case 'less': return { type: 'badge', label: 'LESS', color: '#1d365d' };
-      case 'wasm': return { type: 'badge', label: 'WASM', color: '#654ff0' };
-
-      // Backend / Systems
-      case 'py': return { type: 'badge', label: 'PY', color: '#3776ab' };
-      case 'go': return { type: 'badge', label: 'GO', color: '#00add8' };
-      case 'rs': return { type: 'badge', label: 'RS', color: '#dea584' };
-      case 'java': return { type: 'badge', label: 'J', color: '#b07219' };
-      case 'class': return { type: 'badge', label: 'CLS', color: '#b07219' };
-      case 'jar': return { type: 'icon', icon: Archive, color: '#b07219' };
-      case 'c': return { type: 'badge', label: 'C', color: '#a8b9cc' };
-      case 'h': return { type: 'badge', label: 'H', color: '#a8b9cc' };
-      case 'cpp': case 'cc': case 'cxx': return { type: 'badge', label: 'C++', color: '#00599c' };
-      case 'hpp': case 'hh': case 'hxx': return { type: 'badge', label: 'H++', color: '#00599c' };
-      case 'cs': return { type: 'badge', label: 'C#', color: '#178600' };
-      case 'php': return { type: 'badge', label: 'PHP', color: '#4f5d95' };
-      case 'rb': return { type: 'badge', label: 'RB', color: '#701516' };
-      case 'swift': return { type: 'badge', label: 'SW', color: '#ffac45' };
-      case 'kt': case 'kts': return { type: 'badge', label: 'KT', color: '#7f52ff' };
-      case 'scala': return { type: 'badge', label: 'SC', color: '#dc322f' };
-      case 'dart': return { type: 'badge', label: 'DA', color: '#00b4ab' };
-      case 'lua': return { type: 'badge', label: 'LUA', color: '#000080' };
-      case 'pl': return { type: 'badge', label: 'PL', color: '#0298c3' };
-      case 'ex': case 'exs': return { type: 'badge', label: 'EX', color: '#6e4a7e' };
-      case 'erl': return { type: 'badge', label: 'ERL', color: '#b83998' };
-      case 'hs': return { type: 'badge', label: 'HS', color: '#5e5086' };
-      case 'clj': return { type: 'badge', label: 'CLJ', color: '#db5855' };
-      case 'lisp': return { type: 'badge', label: 'LISP', color: '#3fb68b' };
-      case 'f90': case 'f95': return { type: 'badge', label: 'F', color: '#4d41b1' };
-      case 'r': return { type: 'badge', label: 'R', color: '#198ce7' };
-      case 'jl': return { type: 'badge', label: 'JL', color: '#9558b2' };
-      case 'zig': return { type: 'badge', label: 'ZIG', color: '#ec915c' };
-      case 'nim': return { type: 'badge', label: 'NIM', color: '#ffc200', textColor: '#000' };
-
-      // Config / Data
-      case 'json': return { type: 'icon', icon: FileJson, color: '#cbcb41' };
-      case 'json5': return { type: 'icon', icon: FileJson, color: '#cbcb41' };
-      case 'yaml': case 'yml': return { type: 'icon', icon: Layers, color: '#cb171e' };
-      case 'toml': return { type: 'icon', icon: Settings2, color: '#9c4221' };
-      case 'xml': return { type: 'badge', label: 'XML', color: '#0060ac' };
-      case 'ini': return { type: 'icon', icon: Settings2, color: '#cccccc' };
-      case 'conf': return { type: 'icon', icon: Settings2, color: '#cccccc' };
-      case 'csv': return { type: 'icon', icon: Table, color: '#217346' };
-      case 'sql': return { type: 'icon', icon: Database, color: '#336791' };
-      case 'db': case 'sqlite': return { type: 'icon', icon: Database, color: '#336791' };
-      case 'graphql': case 'gql': return { type: 'badge', label: 'GQL', color: '#e10098' };
-      case 'proto': return { type: 'badge', label: 'PB', color: '#4d41b1' };
-
-      // Shell / Scripts
-      case 'sh': case 'bash': case 'zsh': case 'fish': return { type: 'icon', icon: Terminal, color: '#4ebd37' };
-      case 'bat': case 'cmd': case 'ps1': return { type: 'icon', icon: Terminal, color: '#cccccc' };
-
-      // Assets
-      case 'png': case 'jpg': case 'jpeg': case 'gif': case 'webp': case 'ico': case 'svg': case 'bmp': case 'tiff':
-        return { type: 'icon', icon: ImageIcon, color: '#b07219' };
-      case 'mp3': case 'wav': case 'ogg': case 'flac': case 'm4a':
-        return { type: 'icon', icon: Music, color: '#d07e6b' };
-      case 'mp4': case 'mov': case 'avi': case 'mkv': case 'webm':
-        return { type: 'icon', icon: Video, color: '#d07e6b' };
-      case 'zip': case 'tar': case 'gz': case '7z': case 'rar':
-        return { type: 'icon', icon: Archive, color: '#dbb32d' };
-      case 'ttf': case 'otf': case 'woff': case 'woff2': case 'eot':
-        return { type: 'icon', icon: Type, color: '#ff5252' };
-      case '3d': case 'obj': case 'fbx': case 'stl': case 'gltf':
-        return { type: 'icon', icon: Box, color: '#2496ed' };
-
-      // Docs
-      case 'md': case 'markdown': return { type: 'icon', icon: FileText, color: '#999999' };
-      case 'txt': case 'text': return { type: 'icon', icon: FileText, color: '#808080' };
-      case 'pdf': return { type: 'badge', label: 'PDF', color: '#b30b00' };
-      case 'doc': case 'docx': return { type: 'badge', label: 'DOC', color: '#2b579a' };
-
-      default: return { type: 'icon', icon: File, color: '#8b8b96' };
+      case 'ts': return 'ts';
+      case 'tsx': return 'tsx';
+      case 'js': case 'mjs': case 'cjs': return 'js';
+      case 'jsx': return 'jsx';
+      case 'svelte': return 'svelte';
+      case 'py': return 'py';
+      case 'go': return 'go';
+      case 'rs': return 'rs';
+      case 'cpp': case 'cc': return 'cpp';
+      case 'c': case 'h': return 'c';
+      case 'java': return 'java';
+      case 'rb': return 'rb';
+      case 'php': return 'php';
+      case 'swift': return 'swift';
+      case 'kt': case 'kts': return 'kt';
+      case 'dart': return 'dart';
+      case 'ex': case 'exs': return 'ex';
+      case 'lua': return 'lua';
+      case 'cs': return 'cs';
+      case 'zig': return 'zig';
+      case 'asm': case 's': return 'asm';
+      case 'html': return 'html';
+      case 'css': case 'scss': case 'sass': return 'css';
+      case 'json': return 'json';
+      case 'md': case 'markdown': return 'md';
+      case 'yaml': case 'yml': return 'yaml';
+      case 'toml': return 'toml';
+      case 'sql': return 'sql';
+      case 'xml': return 'xml';
+      case 'graphql': case 'gql': return 'gql';
+      case 'png': case 'jpg': case 'jpeg': case 'gif': case 'webp': case 'svg': case 'ico': return 'image';
+      default: return 'default';
     }
   };
 
-  let theme = $derived(getTheme(extension, fileName));
+  let type = $derived(getType(extension, fileName));
+
+  const badgeMap: Record<string, { label: string; color: string; darkText?: boolean }> = {
+    ts: { label: 'TS', color: colors.typescript },
+    tsx: { label: 'TX', color: colors.typescript },
+    js: { label: 'JS', color: colors.javascript, darkText: true },
+    jsx: { label: 'JX', color: colors.javascript, darkText: true },
+    go: { label: 'GO', color: colors.go },
+    rs: { label: 'RS', color: colors.rust },
+    cpp: { label: 'C++', color: colors.cpp },
+    c: { label: 'C', color: colors.c },
+    java: { label: 'J', color: colors.java },
+    rb: { label: 'RB', color: colors.ruby },
+    php: { label: 'PHP', color: colors.php },
+    swift: { label: 'SW', color: colors.swift },
+    kt: { label: 'KT', color: colors.kotlin },
+    dart: { label: 'DA', color: colors.dart },
+    ex: { label: 'EX', color: colors.elixir },
+    lua: { label: 'LUA', color: colors.lua },
+    cs: { label: 'C#', color: colors.csharp },
+    zig: { label: 'ZIG', color: colors.zig },
+    asm: { label: 'ASM', color: colors.asm },
+    html: { label: '<>', color: colors.html },
+    css: { label: '#', color: colors.css },
+    xml: { label: 'XML', color: colors.xml },
+    toml: { label: 'TML', color: colors.toml },
+    gql: { label: 'GQL', color: colors.graphql }
+  };
 </script>
 
 <div 
-  class="inline-flex items-center justify-center shrink-0 {className}"
+  class="inline-flex items-center justify-center shrink-0 {className} overflow-hidden"
   style="width: {size}px; height: {size}px;"
 >
-  {#if theme.type === 'badge'}
-    <div 
-      class="w-full h-full rounded-[2px] flex items-center justify-center font-bold tracking-tighter shadow-sm"
-      style="background: {theme.color}; color: {theme.textColor || '#fff'}; font-size: {size * 0.5}px; line-height: 1;"
-    >
-      {theme.label}
-    </div>
+  {#if type === 'svelte'}
+    <svg viewBox="0 0 32 32" width={size} height={size}>
+      <path fill={colors.svelte} d="M27.573 4.229c-2.927-4.25-8.656-5.479-13.068-2.802l-7.464 4.745c-2.042 1.281-3.443 3.365-3.854 5.734-0.365 1.969-0.047 4.005 0.891 5.776-0.641 0.964-1.073 2.052-1.266 3.198-0.427 2.406 0.13 4.885 1.547 6.88 2.932 4.24 8.646 5.474 13.068 2.828l7.469-4.75c2.031-1.281 3.427-3.365 3.839-5.734 0.359-1.964 0.042-3.995-0.896-5.755 1.984-3.115 1.88-7.12-0.266-10.12zM13.76 28.172c-2.401 0.625-4.938-0.318-6.349-2.359-0.865-1.198-1.182-2.677-0.932-4.146l0.146-0.708 0.135-0.438 0.401 0.266c0.88 0.667 1.865 1.146 2.917 1.469l0.271 0.094-0.031 0.266c-0.026 0.37 0.083 0.786 0.297 1.104 0.438 0.63 1.198 0.932 1.932 0.734 0.161-0.052 0.318-0.104 0.453-0.188l7.438-4.745c0.375-0.24 0.615-0.599 0.708-1.026 0.083-0.443-0.026-0.896-0.266-1.255-0.443-0.615-1.198-0.891-1.932-0.708-0.161 0.057-0.333 0.12-0.469 0.203l-2.813 1.786c-2.661 1.583-6.099 0.839-7.865-1.708-0.859-1.198-1.198-2.693-0.938-4.146 0.26-1.438 1.12-2.698 2.365-3.469l7.422-4.745c0.469-0.292 0.974-0.505 1.521-0.667 2.401-0.625 4.932 0.318 6.349 2.349 1 1.406 1.281 3.203 0.76 4.849l-0.135 0.443-0.385-0.266c-0.891-0.651-1.88-1.146-2.932-1.469l-0.266-0.078 0.026-0.266c0.026-0.391-0.083-0.802-0.297-1.12-0.438-0.63-1.198-0.896-1.932-0.708-0.161 0.052-0.318 0.104-0.453 0.188l-7.453 4.786c-0.375 0.25-0.615 0.599-0.693 1.036-0.078 0.427 0.026 0.896 0.266 1.24 0.427 0.63 1.203 0.896 1.922 0.708 0.172-0.052 0.333-0.104 0.464-0.188l2.844-1.813c0.464-0.307 0.984-0.531 1.516-0.677 2.417-0.63 4.938 0.318 6.349 2.359 0.865 1.198 1.198 2.677 0.958 4.13-0.25 1.438-1.099 2.698-2.333 3.469l-7.438 4.734c-0.484 0.292-1.005 0.521-1.547 0.677z"/>
+    </svg>
+  {:else if type === 'md'}
+    <svg viewBox="0 0 208 128" width={size} height={size}>
+      <path fill="currentColor" class="text-[var(--color-text-primary)]" d="M30 98V30h20l20 25 20-25h20v68H90V59L70 84 50 59v39zm125 0l-30-33h20V30h20v35h20z"/>
+    </svg>
+  {:else if badgeMap[type]}
+    {@const b = badgeMap[type]}
+    <svg viewBox="0 0 32 32" width={size} height={size}>
+      <rect width="32" height="32" rx="4" fill={b.color} />
+      <text 
+        x="16" 
+        y={b.label.length > 2 ? "21" : "22"} 
+        text-anchor="middle" 
+        font-family="Inter, -apple-system, sans-serif" 
+        font-weight="800" 
+        font-size={b.label.length > 2 ? "11" : "14"} 
+        fill={b.darkText ? "#323330" : "white"}
+      >{b.label}</text>
+    </svg>
+  {:else if type === 'py'}
+    <svg viewBox="0 0 32 32" width={size} height={size}>
+      <path fill={colors.python} d="M16 3C11.03 3 11.28 5.16 11.28 5.16l.03 3.53h4.75v.66H9.31S5 8.81 5 14.16c0 5.34 3.81 5.16 3.81 5.16h2.28v-3.19s-.06-3.81 3.75-3.81h5.69s3.66.06 3.66-3.53V5.16S24.44 3 16 3zm-3.81 1.84a1.16 1.16 0 1 1 0 2.31 1.16 1.16 0 0 1 0-2.31z"/>
+      <path fill="#ffd343" d="M16 29c4.97 0 4.72-2.16 4.72-2.16l-.03-3.53h-4.75v-.66h6.75S27 23.19 27 17.84c0-5.34-3.81-5.16-3.81-5.16h-2.28v3.19s.06 3.81-3.75 3.81h-5.69s-3.66-.06-3.66 3.53v3.63S7.56 29 16 29zm3.81-1.84a1.16 1.16 0 1 1 0-2.31 1.16 1.16 0 0 1 0-2.31z"/>
+    </svg>
+  {:else if type === 'json'}
+    <FileJson size={size} style="color: {colors.json};" strokeWidth={2.5} />
+  {:else if type === 'git'}
+    <Hash size={size} style="color: {colors.git};" strokeWidth={2.5} />
+  {:else if type === 'docker'}
+    <Layers size={size} style="color: {colors.docker};" strokeWidth={2.5} />
+  {:else if type === 'node'}
+    <Lock size={size} style="color: {colors.node};" strokeWidth={2.5} />
+  {:else if type === 'yaml'}
+    <Settings2 size={size} style="color: {colors.yaml};" strokeWidth={2.5} />
+  {:else if type === 'sql'}
+    <Database size={size} style="color: {colors.sql};" strokeWidth={2.5} />
+  {:else if type === 'shell'}
+    <Terminal size={size} style="color: {colors.shell};" strokeWidth={2.5} />
+  {:else if type === 'image'}
+    <ImageIcon size={size} style="color: {colors.image};" strokeWidth={2.5} />
   {:else}
-    <theme.icon size={size} style="color: {theme.color};" strokeWidth={2.5} />
+    <File size={size} style="color: #8b8b96;" strokeWidth={2.5} />
   {/if}
 </div>
