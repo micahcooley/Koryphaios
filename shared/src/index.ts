@@ -471,6 +471,12 @@ export interface KoryphaiosConfig {
   };
   contextPaths?: string[];
   dataDirectory: string;
+  interaction?: {
+    /** Ask targeted clarification questions before execution when prompts are underspecified. */
+    clarifyFirstEnabled?: boolean;
+    /** Hard cap for clarification questions asked in a single request. */
+    maxClarifyQuestions?: number;
+  };
 }
 
 export interface MCPServerConfig {

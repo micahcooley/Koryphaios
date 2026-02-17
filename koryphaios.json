@@ -39,5 +39,9 @@
     "AGENTS.md",
     ".opencode.json",
     "CONVENTIONS.md"
-  ]
+  ],
+  "interaction": {
+    "clarifyFirstEnabled": false,
+    "maxClarifyQuestions": 4
+  }
 }
