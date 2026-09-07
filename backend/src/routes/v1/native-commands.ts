@@ -18,6 +18,7 @@ import {
   ValidationError,
 } from '../../errors/types';
 import { resolveModel } from '../../providers';
+import { splitProviderKey } from '../../providers/provider-key';
 import {
   executeNativeSlashCommand,
   getNativeProviderLabel,
@@ -76,7 +77,7 @@ export const nativeCommandRoutes = new Elysia({ prefix: '/api/native-commands' }
         // last-resolved routing for the session, then the first available CLI.
         let providerName = '';
         if (body.model && body.model.includes(':')) {
-          providerName = body.model.split(':')[0];
+          providerName = splitProviderKey(body.model).provider;
         }
         if (!providerName) {
           const routing = kory.getLastManagerRouting(body.sessionId);
@@ -157,12 +158,7 @@ export const nativeCommandRoutes = new Elysia({ prefix: '/api/native-commands' }
               emit(`/${parsed.command} is not a recognized ${providerLabel} command.`, {
                 isError: true,
               });
-              await runs.fail(
-                body.sessionId,
-                runId,
-                run.revision,
-                'native_command_not_recognized',
-              );
+              await runs.fail(body.sessionId, runId, run.revision, 'native_command_not_recognized');
               return;
             }
             await runs.complete(body.sessionId, runId, run.revision, 'native_command_completed');

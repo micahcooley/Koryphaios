@@ -573,7 +573,9 @@ class ProviderRegistry {
   private restoreVerificationRecord(name: ProviderName, config: ProviderConfig): void {
     if (config.disabled || !config.lastVerifiedAt || !config.lastVerificationScope) return;
     this.verificationRecords.set(name, {
-      state: 'verified',
+      // Older configs predate lastVerificationState and could only have been
+      // verified-grade; custom endpoints persist 'detected' explicitly.
+      state: config.lastVerificationState ?? 'verified',
       checkedAt: config.lastVerifiedAt,
       scope: config.lastVerificationScope,
     });
@@ -956,6 +958,13 @@ class ProviderRegistry {
       models: def.models,
       selectedModels: def.models ?? [],
       hideModelSelector: false,
+      // Persist the catalog confirmation so the provider survives restarts
+      // as detected instead of dropping to unconfigured.
+      ...(catalogDetectedAt && {
+        lastVerifiedAt: catalogDetectedAt,
+        lastVerificationScope: 'catalog' as const,
+        lastVerificationState: 'detected' as const,
+      }),
       ...(previous?.customIcon && { customIcon: previous.customIcon }),
       disabled: false,
     };
@@ -2006,29 +2015,40 @@ class ProviderRegistry {
       // A CLI may have moved off PATH or lost its local login material since
       // its marker was saved. Re-evaluate that detection on every reconnect;
       // only a supported account probe may produce a verified state.
-      if (
-        connectionChanged ||
-        CLI_HARNESS_PROVIDERS.has(name) ||
-        this.verificationRecords.get(name)?.state !== 'verified'
-      ) {
+      // Re-probe only when connection material changed. CLI harnesses own
+      // their credentials externally, so reconnects always re-read local CLI
+      // state. Re-probing unchanged credentials adds no information — and for
+      // custom endpoints (which can never exceed 'detected') the old
+      // `state !== 'verified'` clause re-probed on EVERY save, so a
+      // preference-only save (e.g. Manage Models) was rejected whenever the
+      // endpoint hiccuped and the failure poisoned the stored record.
+      if (connectionChanged || CLI_HARNESS_PROVIDERS.has(name)) {
         const verification = await this.verifyConnection(name, nextConnection);
         if (!verification.success) return verification;
         acceptedState = verification.state ?? 'verified';
         acceptedScope = verification.scope ?? this.verificationScopeFor(name);
       }
 
-      const verifiedAt =
-        acceptedState === 'verified'
-          ? Date.now()
-          : connectionChanged
-            ? undefined
-            : existing?.lastVerifiedAt;
-      const verificationScope =
-        acceptedState === 'verified'
-          ? (acceptedScope ?? this.verificationScopeFor(name))
-          : connectionChanged
-            ? undefined
-            : existing?.lastVerificationScope;
+      // Remember catalog/endpoint confirmation across restarts so custom
+      // providers don't demote themselves to unconfigured on every boot.
+      const confirmedState = acceptedState === 'verified' || acceptedState === 'detected';
+      const verifiedAt = confirmedState
+        ? Date.now()
+        : connectionChanged
+          ? undefined
+          : existing?.lastVerifiedAt;
+      const verificationScope = confirmedState
+        ? (acceptedScope ?? this.verificationScopeFor(name))
+        : connectionChanged
+          ? undefined
+          : existing?.lastVerificationScope;
+      const verificationState: ProviderConfig['lastVerificationState'] = confirmedState
+        ? acceptedState === 'detected'
+          ? 'detected'
+          : 'verified'
+        : connectionChanged
+          ? undefined
+          : existing?.lastVerificationState;
       const providerConfig: ProviderConfig = {
         ...existing,
         name,
@@ -2042,6 +2062,7 @@ class ProviderRegistry {
         hideModelSelector: credentials.hideModelSelector ?? existing?.hideModelSelector,
         lastVerifiedAt: verifiedAt,
         lastVerificationScope: verificationScope,
+        lastVerificationState: verificationState,
         disabled: false, // Explicitly enable on setCredentials
         headers: existing?.headers,
       };
@@ -2195,6 +2216,7 @@ class ProviderRegistry {
       config.authToken = undefined;
       config.lastVerifiedAt = undefined;
       config.lastVerificationScope = undefined;
+      config.lastVerificationState = undefined;
       config.disabled = true;
       this.providerConfigs.set(name, config);
     }
@@ -2334,6 +2356,7 @@ class ProviderRegistry {
       hideModelSelector: userConfig?.hideModelSelector ?? false,
       lastVerifiedAt: userConfig?.lastVerifiedAt,
       lastVerificationScope: userConfig?.lastVerificationScope,
+      lastVerificationState: userConfig?.lastVerificationState,
       disabled: isDisabled,
       headers: userConfig?.headers,
       // Preserve custom-provider metadata so BYO providers survive restarts.

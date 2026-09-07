@@ -13,7 +13,7 @@ import type { ProviderEvent } from '../types';
 const realFetch = globalThis.fetch;
 
 function mockFetch(input: any): Promise<Response> {
-  const url = typeof input === 'string' ? input : input?.url ?? '';
+  const url = typeof input === 'string' ? input : (input?.url ?? '');
   if (url.includes('/chat/completions')) {
     return Promise.resolve(
       new Response(
@@ -137,7 +137,10 @@ describe('Custom (bring-your-own) provider', () => {
     })) {
       events.push(e);
     }
-    const text = events.filter((e) => e.type === 'content_delta').map((e) => e.content).join('');
+    const text = events
+      .filter((e) => e.type === 'content_delta')
+      .map((e) => e.content)
+      .join('');
     expect(text).toContain('CUSTOM_OK');
     expect(events.some((e) => e.type === 'complete')).toBe(true);
   });
@@ -146,5 +149,61 @@ describe('Custom (bring-your-own) provider', () => {
     registry.removeCustomProvider('custom:keyless');
     expect(registry.get('custom:keyless')).toBeUndefined();
     expect(registry.getStatus().find((p) => p.name === 'custom:keyless')).toBeUndefined();
+  });
+
+  it('enriches custom models with models.dev reasoning levels', async () => {
+    const { __resetModelsDevCacheForTesting, warmModelsDevCache } = await import('../models-dev');
+    __resetModelsDevCacheForTesting();
+    const withCatalog = (async (input: any) => {
+      const url = typeof input === 'string' ? input : (input?.url ?? '');
+      if (url === 'https://models.dev/api.json') {
+        return new Response(
+          JSON.stringify({
+            openai: {
+              models: {
+                'test-reasoning-model': {
+                  id: 'test-reasoning-model',
+                  reasoning: true,
+                  reasoning_options: [{ type: 'effort', values: ['low', 'medium', 'high'] }],
+                  limit: { context: 200000, output: 32000 },
+                  modalities: { input: ['text', 'image'], output: ['text'] },
+                },
+              },
+            },
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        );
+      }
+      return mockFetch(input);
+    }) as unknown as typeof fetch;
+    globalThis.fetch = withCatalog;
+    try {
+      await warmModelsDevCache();
+      expect(
+        registry.registerCustomProvider({
+          id: 'custom:enriched',
+          label: 'Enriched',
+          kind: 'openai',
+          baseUrl: 'https://enriched.example/v1',
+          models: ['test-reasoning-model', 'test-plain-model'],
+          catalogDetected: true,
+        }).success,
+      ).toBe(true);
+      const defs = registry.get('custom:enriched')!.listModels();
+      const reasoned = defs.find((m) => m.id === 'test-reasoning-model')!;
+      expect(reasoned.canReason).toBe(true);
+      expect(reasoned.reasoningLevels).toEqual(['low', 'medium', 'high']);
+      expect(reasoned.contextWindow).toBe(200000);
+      expect(reasoned.supportsAttachments).toBe(true);
+      expect(reasoned.vision).toBe(true);
+      // Unknown ids stay generic — enrichment never invents capabilities.
+      const plain = defs.find((m) => m.id === 'test-plain-model')!;
+      expect(plain.canReason).toBe(false);
+      expect(plain.reasoningLevels).toBeUndefined();
+      expect(plain.supportsAttachments).toBeFalsy();
+      expect(plain.vision).toBeFalsy();
+    } finally {
+      globalThis.fetch = mockFetch as unknown as typeof fetch;
+    }
   });
 });

@@ -79,6 +79,21 @@ const PROVIDER_KEY: Record<string, string> = {
   bedrock: 'amazon-bedrock',
 };
 
+/** Resolve the models.dev provider keys to look under for a Koryphaios
+ *  provider. Custom (`custom:<slug>`) providers have no catalog entry of
+ *  their own, so they resolve through their wire-format family — primary
+ *  family first, then the other two, so a model served over an
+ *  OpenAI-compatible endpoint still matches its lab entry. */
+export function modelsDevKeysFor(providerName: string, kind?: string): string[] {
+  if (providerName.startsWith('custom:')) {
+    if (kind === 'anthropic') return ['anthropic', 'openai', 'google'];
+    if (kind === 'gemini') return ['google', 'openai', 'anthropic'];
+    return ['openai', 'anthropic', 'google'];
+  }
+  const key = PROVIDER_KEY[providerName];
+  return key ? [key] : [];
+}
+
 /** Broader mapping used for PRICING lookups (capability enrichment stays
  *  scoped to the opencode providers above). */
 const PRICING_PROVIDER_KEY: Record<string, string> = {
@@ -113,6 +128,8 @@ interface ModelsDevEntry {
   limit?: { context?: number; output?: number };
   /** $ per million tokens, straight from models.dev. */
   cost?: { input?: number; output?: number; cache_read?: number; cache_write?: number };
+  /** Media the lab reports, e.g. modalities: { input: ["text", "image"] }. */
+  modalities?: { input?: string[]; output?: string[] };
 }
 
 let cache: Record<string, { models?: Record<string, ModelsDevEntry> }> | null = null;
@@ -202,11 +219,9 @@ export function applyModelsDevMetadata(
   models: ModelDef[],
   keys?: string[],
 ): ModelDef[] {
-  const candidateKeys = (keys && keys.length > 0
-    ? keys
-    : PROVIDER_KEY[providerName]
-      ? [PROVIDER_KEY[providerName]]
-      : []) as string[];
+  const candidateKeys = (
+    keys && keys.length > 0 ? keys : PROVIDER_KEY[providerName] ? [PROVIDER_KEY[providerName]] : []
+  ) as string[];
   if (candidateKeys.length === 0) return models;
   const entriesByLower = new Map<string, { entry: ModelsDevEntry; key: string }>();
   for (const key of candidateKeys) {
@@ -229,9 +244,7 @@ export function applyModelsDevMetadata(
     // known effort/variant suffixes so the family-level entry (e.g.
     // "gemini-3.7-flash") still gets the verified context.
     const variantSuffixes = /-(?:low|medium|high|xhigh|ultra|max|none|thinking|pro)$/i;
-    const strippedVariant = variantSuffixes.test(bare)
-      ? bare.replace(variantSuffixes, '')
-      : '';
+    const strippedVariant = variantSuffixes.test(bare) ? bare.replace(variantSuffixes, '') : '';
     // Try: exact key, case-insensitive key, last segment after "/" (namespaced ids),
     // then the variant-stripped slug as a last-resort fallback.
     const candidates = [
@@ -254,12 +267,20 @@ export function applyModelsDevMetadata(
     if (!e) return m;
     const levels = levelsFromOptions(e.reasoning_options);
     const ctx = e.limit?.context;
+    // Image input is additive-only: when the lab reports it, advertise it so
+    // vision pickers and attachment flows include the model. When the lab is
+    // silent (or says text-only), leave the fields unknown rather than
+    // declaring false — a relay may still carry pixels, and an explicit false
+    // makes the OpenAI path strip images up front.
+    const imageInput =
+      e.modalities?.input?.some((modality) => modality.toLowerCase() === 'image') === true;
     return {
       ...m,
       ...(e.reasoning === true ? { canReason: true } : {}),
       ...(levels ? { reasoningLevels: levels } : {}),
       ...(ctx && ctx > 0 ? { contextWindow: ctx, contextVerified: true } : {}),
       ...(e.limit?.output && e.limit.output > 0 ? { maxOutputTokens: e.limit.output } : {}),
+      ...(imageInput ? { vision: true, supportsAttachments: true } : {}),
     };
   });
 }

@@ -25,4 +25,28 @@ describe('provider model routing', () => {
       model: 'codex-account:YWNjb3VudA:gpt-5.6-sol',
     });
   });
+
+  it('splits custom provider selections on the second colon', () => {
+    const value = 'custom:my-llm:my-model-a';
+    expect(splitProviderModel(value)).toEqual({
+      provider: 'custom:my-llm',
+      model: 'my-model-a',
+    });
+
+    const routing = new RoutingServiceEnhanced({
+      config: {
+        providers: {},
+        agents: {
+          manager: { model: 'test' },
+          coder: { model: 'test' },
+          task: { model: 'test' },
+        },
+        dataDirectory: '.',
+      },
+    }).resolveActiveRouting(value);
+    expect(routing).toEqual({
+      provider: 'custom:my-llm',
+      model: 'my-model-a',
+    });
+  });
 });

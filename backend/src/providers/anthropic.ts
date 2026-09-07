@@ -14,7 +14,7 @@ import {
 import { withRetry, withTimeoutSignal } from './utils';
 import { createUsageInterceptingFetch } from '../credit-accountant';
 import { providerLog } from '../logger';
-import { applyModelsDevMetadata, refreshModelsDevCache } from './models-dev';
+import { applyModelsDevMetadata, refreshModelsDevCache, modelsDevKeysFor } from './models-dev';
 import { isModelListCacheFresh, mergeModelLists, modelFromRemoteId } from './model-list-cache';
 import { safeProviderDiagnostic, safeProviderFailureMessage } from './provider-diagnostics';
 import { resolvePromptCacheSegments } from './prompt-cache';
@@ -108,7 +108,11 @@ export class AnthropicProvider implements Provider {
           discovered.push(modelFromRemoteId(id, this.name, []));
         }
         if (discovered.length > 0) {
-          this.cachedModels = applyModelsDevMetadata(this.name, mergeModelLists([], discovered));
+          this.cachedModels = applyModelsDevMetadata(
+            this.name,
+            mergeModelLists([], discovered),
+            modelsDevKeysFor(this.name, this.config.kind),
+          );
           providerLog.debug(
             { provider: this.name, count: this.cachedModels.length },
             'Model list refreshed from provider API',

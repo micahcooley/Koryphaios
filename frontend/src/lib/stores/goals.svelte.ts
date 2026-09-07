@@ -1,6 +1,7 @@
 import type { Goal, GoalScope } from '@koryphaios/shared';
 import { apiFetch } from '$lib/api.svelte';
 import { apiUrl } from '$lib/utils/api-url';
+import { parseProviderModelSelection } from '$lib/utils/model-config';
 import { browser } from '$app/environment';
 import { sessionStore } from './sessions.svelte';
 
@@ -65,7 +66,7 @@ async function drive(
   const model =
     options.model ??
     (browser ? (localStorage.getItem('koryphaios-selected-model') ?? undefined) : undefined);
-  const provider = options.provider ?? model?.split(':')[0];
+  const provider = options.provider ?? parseProviderModelSelection(model).provider;
   if (!provider || !model)
     throw new Error('Select a provider model in the composer before driving a goal');
   const res = await apiFetch(apiUrl(`/api/goals/${id}/drive`), {

@@ -47,6 +47,7 @@
   import FolderOpen from 'lucide-svelte/icons/folder-open';
   import FolderPlus from 'lucide-svelte/icons/folder-plus';
   import Clock from 'lucide-svelte/icons/clock';
+  import X from 'lucide-svelte/icons/x';
   import TeamWorkspace from '$lib/components/TeamWorkspace.svelte';
   import { invoke } from '@tauri-apps/api/core';
   import {
@@ -55,13 +56,18 @@
     pruneRecentProjects,
     pathExists,
     addRecentProject,
+    removeRecentProject,
     buildNewProjectTemplate,
     createProjectSession,
     readProjectFile,
     readProjectFolder,
     insertPromptTemplate,
   } from '$lib/utils/projectManager';
-  import { getModelConfigurationWarning } from '$lib/utils/model-config';
+  import {
+    getModelConfigurationWarning,
+    parseProviderModelSelection,
+  } from '$lib/utils/model-config';
+  import { loadLastSessionId } from '$lib/stores/navigation-preferences';
   import { registerEligibleEscape } from '$lib/utils/double-escape';
   import {
     implementationPrompt,
@@ -535,6 +541,12 @@
   const deselectAuthoritativeProject = workspace.deselectAuthoritativeProject;
   const refreshWorkspaceNavigation = workspace.refreshWorkspaceNavigation;
   const acknowledgeUnavailableProject = workspace.acknowledgeUnavailableProject;
+
+  // Seed the session→project fence with the stored last-session id. The
+  // boot-restored session is not a user switch, so it must not bulldoze the
+  // authoritative backend workspace state (deselecting the open project or
+  // jumping to the old session's folder on every relaunch).
+  workspace.setLastReconciledSessionId(loadLastSessionId());
 
   $effect(() => {
     const authenticated = appStore.authReady;
@@ -1084,8 +1096,11 @@
     }
   }
 
-  async function openRecentProject(id: string) {
-    const found = recentProjects.find((p) => p.id === id);
+  function removeRecentProjectEntry(id: string) {
+    recentProjects = removeRecentProject(recentProjects, id);
+  }
+
+  async function openRecentProject(id: string) {    const found = recentProjects.find((p) => p.id === id);
     if (!found) {
       toastStore.error('Recent project not found');
       return;
@@ -1244,19 +1259,14 @@
           reconcileWorkspaceSnapshot(body.data);
           workspace.setLastReconciledSessionId('');
           sessionStore.activeSessionId = '';
-          {
-            const newId = await sessionStore.newChat();
-            if (newId) {
-              workspace.setLastReconciledSessionId(newId);
-              toastStore.success(
-                `Opened workspace ${projectDisplayName(selectedPath)} with ${body.data.projects.length} project folders — new chat`,
-              );
-            } else {
-              toastStore.success(
-                `Opened workspace ${projectDisplayName(selectedPath)} with ${body.data.projects.length} project folders`,
-              );
-            }
-          }
+          // Stay on the workspace chooser: the welcome screen lists the
+          // workspace root and its project folders ("Choose a project for
+          // this chat"), and picking one creates a correctly scoped chat.
+          // Auto-creating a chat here flashed the chooser for a split
+          // second before yanking the user into an empty session.
+          toastStore.success(
+            `Opened workspace ${projectDisplayName(selectedPath)} with ${body.data.projects.length} project folders — choose a project to start chatting`,
+          );
         } catch (error) {
           toastStore.error(String(error));
         }
@@ -1415,7 +1425,11 @@
     }
     // Remote CLI model: copies this project to the host to run there. Confirm
     // once per session so the client always knows their files are leaving.
-    const providerName = model?.includes(':') ? model.split(':')[0] : '';
+    const providerName =
+      parseProviderModelSelection(
+        model,
+        wsStore.providers.map((p) => p.name),
+      ).provider ?? '';
     const remoteProvider = providerName
       ? wsStore.providers.find((p) => p.name === providerName)
       : undefined;
@@ -1738,15 +1752,32 @@
                 >
               </div>
               <div class="flex flex-col gap-2">
-                {#each recentProjects.slice(0, 5) as project (project.id)}
+              {#each recentProjects.slice(0, 5) as project (project.id)}
+                <div
+                  role="button"
+                  tabindex="0"
+                  class="flex items-center justify-between gap-2 px-4 py-3 rounded-xl text-left text-sm transition-colors border hover:bg-[var(--color-surface-2)] cursor-pointer"
+                  style="color: var(--color-text-primary); border-color: var(--color-border); background: rgba(12, 10, 9, 0.2);"
+                  onclick={() => handleMenuAction(`open_recent:${project.id}`)}
+                  onkeydown={(e) => {
+                    if (e.key === 'Enter') handleMenuAction(`open_recent:${project.id}`);
+                  }}
+                  title={project.path || project.fileName || project.title}
+                >
                   <button
                     type="button"
-                    class="flex items-center justify-between gap-3 px-4 py-3 rounded-xl text-left text-sm transition-colors border hover:bg-[var(--color-surface-2)]"
-                    style="color: var(--color-text-primary); border-color: var(--color-border); background: rgba(12, 10, 9, 0.2);"
-                    onclick={() => handleMenuAction(`open_recent:${project.id}`)}
-                    title={project.path || project.fileName || project.title}
+                    class="shrink-0 rounded-md p-1 transition-colors hover:bg-[var(--color-surface-3)]"
+                    style="color: var(--color-text-muted);"
+                    onclick={(e) => {
+                      e.stopPropagation();
+                      removeRecentProjectEntry(project.id);
+                    }}
+                    title="Remove from recent projects"
+                    aria-label={`Remove ${project.title} from recent projects`}
                   >
-                    <span class="truncate font-medium">{project.title}</span>
+                    <X size={13} />
+                  </button>
+                  <span class="truncate font-medium flex-1">{project.title}</span>
                     <span
                       class="shrink-0 text-xs truncate max-w-[150px]"
                       style="color: var(--color-text-muted);"
@@ -1755,7 +1786,7 @@
                         ? project.path.split('/').pop() || project.path.split('\\').pop()
                         : project.fileName || ''}
                     </span>
-                  </button>
+                  </div>
                 {/each}
               </div>
             </div>

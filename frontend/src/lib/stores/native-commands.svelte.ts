@@ -40,10 +40,15 @@ export const NATIVE_CLI_PROVIDERS = new Set([
   'kimicode',
 ]);
 
-/** Extract the provider id from a composer model selection ("claude:sonnet"). */
+/** Extract the provider id from a composer model selection ("claude:sonnet",
+ *  or "custom:my-llm:my-model" for custom providers whose keys contain a colon). */
 export function providerFromModel(model: string | undefined | null): string {
   if (!model) return '';
   if (model === 'auto') return '';
+  if (model.startsWith('custom:')) {
+    const sep = model.indexOf(':', 'custom:'.length);
+    return sep === -1 ? '' : model.slice(0, sep);
+  }
   const sep = model.indexOf(':');
   return sep === -1 ? '' : model.slice(0, sep);
 }
@@ -66,7 +71,9 @@ export const nativeCommandsStore = {
     }
     fetching.add(provider);
     try {
-      const res = await apiFetch(apiUrl(`/api/native-commands?provider=${encodeURIComponent(provider)}`));
+      const res = await apiFetch(
+        apiUrl(`/api/native-commands?provider=${encodeURIComponent(provider)}`),
+      );
       const json = await parseJsonResponse<NativeCommandsResponse>(res);
       if (!json.ok || !json.data || !json.data.provider) return null;
       const entry = {
@@ -76,7 +83,10 @@ export const nativeCommandsStore = {
       cache.set(provider, entry);
       return entry;
     } catch (err: unknown) {
-      console.warn(`Failed to load native commands for ${provider}:`, err instanceof Error ? err.message : String(err));
+      console.warn(
+        `Failed to load native commands for ${provider}:`,
+        err instanceof Error ? err.message : String(err),
+      );
       return null;
     } finally {
       fetching.delete(provider);
@@ -95,7 +105,10 @@ export const nativeCommandsStore = {
       const json = await parseJsonResponse<{ ok?: boolean; error?: string }>(res);
       return !!json.ok;
     } catch (err: unknown) {
-      console.warn('Failed to run native command:', err instanceof Error ? err.message : String(err));
+      console.warn(
+        'Failed to run native command:',
+        err instanceof Error ? err.message : String(err),
+      );
       return false;
     }
   },

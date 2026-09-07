@@ -29,33 +29,20 @@
   let dontAskAgain = $state(false);
   let initialized = $state(false);
 
+  // Snapshot the catalog once when it first arrives. After init, background
+  // catalog refreshes must never rewrite the user's in-progress picks — that
+  // made selections visibly reset (especially on large custom catalogs where
+  // a live refresh can shift the list mid-session). Stale ids are filtered at
+  // save/display time by the backend status, so keeping them locally is safe.
   $effect(() => {
-    if (!initialized && (availableModels || []).length > 0) {
-      localSelected =
-        (selectedModels || []).length > 0
-          ? [...(selectedModels || [])]
-          : (availableModels || []).map((m) => m.id);
-      initialized = true;
-    } else if (initialized && (availableModels || []).length > 0) {
-      const availableIds = new Set((availableModels || []).map((m) => m.id));
-      const stillValid = localSelected.filter((id) => availableIds.has(id));
-      if (stillValid.length !== localSelected.length) {
-        localSelected = stillValid;
-      }
-      if (localSelected.length === 0 && (availableModels || []).length > 0 && (selectedModels || []).length === 0) {
-        localSelected = (availableModels || []).map((m) => m.id);
-      }
-    }
-  });
-
-  $effect(() => {
-    if ((availableModels || []).length > 0 && !initialized) {
-      localSelected =
-        (selectedModels || []).length > 0
-          ? [...(selectedModels || [])]
-          : (availableModels || []).map((m) => m.id);
-      initialized = true;
-    }
+    if (initialized) return;
+    if ((availableModels || []).length === 0) return;
+    const ids = new Set((availableModels || []).map((m) => m.id));
+    localSelected =
+      (selectedModels || []).length > 0
+        ? (selectedModels || []).filter((id) => ids.has(id))
+        : [...ids];
+    initialized = true;
   });
 
   let filteredModels = $derived(
@@ -184,7 +171,7 @@
             {emptyMessage ?? 'No provider-reported models are available.'}
           </p>
         {:else}
-          {#each filteredModels as model}
+          {#each filteredModels as model (model.id)}
             <button
               type="button"
               class="w-full flex items-center justify-between p-3 rounded-xl transition-all border

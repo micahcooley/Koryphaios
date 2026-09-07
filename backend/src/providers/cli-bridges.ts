@@ -84,10 +84,10 @@ export const FREEBUFF_PTY_HARNESS_NOTE =
   'You are the real Freebuff CLI running inside a Koryphaios-owned disposable transport ' +
   'workspace. The project-local "kory" MCP server exposes the authoritative, role-scoped ' +
   'Koryphaios tools. Use those kory MCP tools for every read, search, edit, command, note, ' +
-  'or orchestration action that should affect the user\'s actual Koryphaios session. Your ' +
+  "or orchestration action that should affect the user's actual Koryphaios session. Your " +
   'native Freebuff tools still exist, but they can see and modify only this disposable ' +
   'workspace and are not authority for the real project. Never claim a native-only action ' +
-  'changed the user\'s project. Finish the requested work in this turn and return a concise ' +
+  "changed the user's project. Finish the requested work in this turn and return a concise " +
   'user-facing answer.';
 
 // ─── Shared kory tool whitelist ────────────────────────────────────────────
@@ -186,7 +186,30 @@ export function getKoryphaiosCursorHome(): string {
 }
 
 export function getKoryphaiosAntigravityHome(): string {
-  return makeIsolatedHome('antigravity-home', join(homedir(), '.antigravity'), []);
+  const dir = makeIsolatedHome('antigravity-home', join(homedir(), '.antigravity'), []);
+  // agy authenticates via ~/.gemini OAuth material, but the child runs with
+  // HOME/ANTIGRAVITY_HOME pointed at this isolated dir. Link the credentials
+  // in so the jailed child signs in as the user (read-only by convention —
+  // agy only reads these). The sandbox mounts the real ~/.gemini read-only so
+  // the links resolve inside the jail too.
+  try {
+    const geminiDir = join(homedir(), '.gemini');
+    const isolatedGemini = join(dir, '.gemini');
+    ensureManagedCliDirectory(isolatedGemini);
+    for (const file of ['oauth_creds.json', 'google_accounts.json']) {
+      const src = join(geminiDir, file);
+      const dst = join(isolatedGemini, file);
+      if (!existsSync(src) || existsSync(dst)) continue;
+      try {
+        symlinkSync(src, dst);
+      } catch {
+        serverLog.debug({}, 'cli-bridges: antigravity credential link best-effort failed');
+      }
+    }
+  } catch {
+    /* best-effort; detection reports login state separately */
+  }
+  return dir;
 }
 
 export function getKoryphaiosGrokHome(): string {

@@ -265,13 +265,15 @@ export function createNotePropertiesBaseTools(
           type: 'string',
           minLength: 1,
           maxLength: MAX_RESOURCE_ID_LENGTH,
-          description: 'ID of an existing saved Base in this project',
+          description:
+            'ID of an existing saved Base in this project (exactly one of baseId or baseName is required)',
         },
         baseName: {
           type: 'string',
           minLength: 1,
           maxLength: 120,
-          description: 'Unique saved Base name in this project',
+          description:
+            'Unique saved Base name in this project (exactly one of baseId or baseName is required)',
         },
         limit: {
           type: 'integer',
@@ -286,7 +288,9 @@ export function createNotePropertiesBaseTools(
           description: 'Deterministic result offset',
         },
       },
-      oneOf: [{ required: ['baseId'] }, { required: ['baseName'] }],
+      // No required/oneOf at the schema root: strict providers (xAI) reject a
+      // root oneOf/anyOf whose branches are not all `type: object`. The
+      // exactly-one-of rule is enforced server-side in run().
     },
     async run(ctx, call) {
       const startedAt = Date.now();

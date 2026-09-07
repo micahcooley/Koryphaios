@@ -163,7 +163,7 @@ export const PROVIDER_DISPLAY: Partial<Record<ProviderName, ProviderDisplayMeta>
       'CLI only. Runs the official cline CLI on your machine — Cline manages its own provider key (run "cline auth …"). No Koryphaios API key.',
   },
   freebuff: {
-    label: 'Freebuff',
+    label: 'Freebuff (Experimental)',
     iconPath: '/provider-icons/lobehub/codebuff.svg',
     deployment: 'local',
     description:

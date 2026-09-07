@@ -878,6 +878,10 @@
 
   $effect(() => {
     if (!showModelSelector || !selectorTarget) return;
+    // The dialog snapshots its catalog at open and owns in-progress picks, so
+    // only refresh its target when the list was still loading. Replacing the
+    // target mid-session used to reset the user's picks on custom providers.
+    if ((selectorTarget.allAvailableModels?.length ?? 0) > 0) return;
     const latest = getProviderStatus(selectorTarget.name);
     if (!latest) return;
     const next = modelSelectorTarget(latest);
@@ -1785,6 +1789,12 @@
                               : ''}
                           {:else if status?.connectionState === 'failed'}
                             Connection failed
+                          {:else if status?.connectionState === 'detected' && status?.verificationScope === 'catalog' && prov.key.startsWith('custom:')}
+                            {@const selectedCount = status.models?.length ?? 0}
+                            {@const availableCount = status.allAvailableModels?.length ?? 0}
+                            Connected{availableCount > 0
+                              ? ` · ${selectedCount > 0 ? selectedCount : '—'}/${availableCount} models enabled`
+                              : ''}
                           {:else if status?.connectionState === 'detected' && status?.verificationScope === 'catalog'}
                             Catalog access detected · inference unverified
                           {:else if installedCli}
@@ -1815,6 +1825,14 @@
                         >
                           <span class="w-1 h-1 rounded-full bg-[var(--color-error)]"></span>
                           Failed
+                        </div>
+                      {:else if status?.connectionState === 'detected' && status?.verificationScope === 'catalog' && prov.key.startsWith('custom:')}
+                        <div
+                          class="flex items-center gap-1.5 px-2 py-0.5 rounded-full bg-[var(--color-success-bg)] text-[var(--color-success)] text-[9px] font-bold"
+                          title="Endpoint added and model catalog confirmed; inference verifies on first use"
+                        >
+                          <span class="w-1 h-1 rounded-full bg-[var(--color-success)]"></span>
+                          Connected
                         </div>
                       {:else if status?.connectionState === 'detected' && status?.verificationScope === 'catalog'}
                         <div
@@ -1924,11 +1942,20 @@
                         </div>
                         <div class="flex flex-wrap items-center justify-between gap-2">
                           <div class="text-[10px] text-[var(--color-text-muted)]">
-                            {status.connectionState === 'verified'
+                            {status.connectionState === 'verified' ||
+                            (prov.key.startsWith('custom:') &&
+                              status.connectionState === 'detected' &&
+                              status.verificationScope === 'catalog' &&
+                              (status.allAvailableModels?.length ?? 0) > 0)
                               ? `${(status.models?.length ?? 0) > 0 ? status.models?.length : '—'} enabled of ${(status.allAvailableModels?.length ?? 0) > 0 ? status.allAvailableModels?.length : '—'} listed`
                               : 'Model availability unverified'}
                           </div>
-                          {#if status.connectionState === 'verified' && !status.hideModelSelector}
+                          {#if (status.connectionState === 'verified' ||
+                            (prov.key.startsWith('custom:') &&
+                              status.connectionState === 'detected' &&
+                              status.verificationScope === 'catalog' &&
+                              (status.allAvailableModels?.length ?? 0) > 0)) &&
+                            !status.hideModelSelector}
                             <button
                               type="button"
                               onclick={() => openModelSelector(status)}
@@ -4413,17 +4440,19 @@
 {/if}
 
 {#if showModelSelector && selectorTarget}
-  <ModelSelectionDialog
-    providerName={selectorTarget.name}
-    availableModels={selectorTarget.allAvailableModels}
-    selectedModels={selectorTarget.selectedModels}
-    emptyMessage={selectorTarget.emptyMessage}
-    onSave={saveSelectedModels}
-    onClose={() => {
-      showModelSelector = false;
-      selectorTarget = null;
-    }}
-  />
+  {#key selectorTarget.name}
+    <ModelSelectionDialog
+      providerName={selectorTarget.name}
+      availableModels={selectorTarget.allAvailableModels}
+      selectedModels={selectorTarget.selectedModels}
+      emptyMessage={selectorTarget.emptyMessage}
+      onSave={saveSelectedModels}
+      onClose={() => {
+        showModelSelector = false;
+        selectorTarget = null;
+      }}
+    />
+  {/key}
 {/if}
 
 {#if showColorPicker}

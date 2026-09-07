@@ -13,9 +13,9 @@
  * unchanged and reports it, so the host always knows the true enforcement level.
  */
 
-import { existsSync, mkdtempSync, mkdirSync, symlinkSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, symlinkSync, rmSync, realpathSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
-import { delimiter, join, basename } from 'node:path';
+import { delimiter, join, basename, dirname } from 'node:path';
 import { homedir, tmpdir } from 'node:os';
 import { serverLog } from '../logger';
 import type { SandboxPolicy } from '@koryphaios/shared';
@@ -100,6 +100,12 @@ export interface WrapOptions {
   configDirs?: string[];
   /** Account/provider configuration that the CLI may inspect but never mutate. */
   readonlyConfigDirs?: string[];
+  /** Unix socket paths (e.g. the D-Bus user bus for OS-keyring OAuth) bound
+   *  read-write. Sockets are always bound rw — a read-only bind cannot
+   *  connect. Request only what the CLI needs: the bus exposes every session
+   *  service, so this is the narrowest hole that still lets keyring-backed
+   *  CLIs sign in. */
+  sockets?: string[];
   policy: SandboxPolicy;
 }
 
@@ -111,6 +117,19 @@ export function sandboxHome(opts: Pick<WrapOptions, 'cwd' | 'homeDir'>): string 
 
 const SYSTEM_RO = ['/usr', '/bin', '/sbin', '/lib', '/lib64', '/opt', '/nix', '/etc/alternatives'];
 const NET_RO = ['/etc/resolv.conf', '/etc/hosts', '/etc/ssl', '/etc/ca-certificates', '/etc/pki'];
+
+function binaryBindDirs(bin: string): string[] {
+  if (!bin.startsWith('/')) return [];
+  const dirs = new Set<string>();
+  dirs.add(dirname(bin));
+  try {
+    const real = realpathSync(bin);
+    if (real.startsWith('/')) dirs.add(dirname(real));
+  } catch {
+    /* dangling or unreadable link — fall back to the literal dir */
+  }
+  return [...dirs].filter((d) => !!d && existsSync(d));
+}
 
 function buildBwrap(bw: string, bin: string, args: string[], opts: WrapOptions): string[] {
   const flags: string[] = [
@@ -132,6 +151,12 @@ function buildBwrap(bw: string, bin: string, args: string[], opts: WrapOptions):
   if (opts.policy.allowNetwork) {
     for (const p of NET_RO) if (existsSync(p)) flags.push('--ro-bind-try', p, p);
   }
+  // The CLI binary itself must be visible inside the namespace. Binaries
+  // installed outside the system roots (e.g. ~/.local/bin/agy, nvm shims)
+  // otherwise fail with `bwrap: execvp <bin>: No such file or directory`.
+  // Bind the containing directory read-only; the skeleton below creates the
+  // parent --dir entries so the mount has a destination.
+  const cliBinDirs = binaryBindDirs(bin);
   // bubblewrap does not create destination parents for arbitrary bind mounts.
   // Managed CLI homes and bridge runtimes commonly live below /home/<user>,
   // which is intentionally absent from the base namespace. Create only the
@@ -141,6 +166,8 @@ function buildBwrap(bw: string, bin: string, args: string[], opts: WrapOptions):
     opts.cwd,
     ...(opts.configDirs ?? []),
     ...(opts.readonlyConfigDirs ?? []),
+    ...(opts.sockets ?? []),
+    ...cliBinDirs,
   ];
   const created = new Set<string>();
   for (const target of mountTargets) {
@@ -165,6 +192,16 @@ function buildBwrap(bw: string, bin: string, args: string[], opts: WrapOptions):
   }
   for (const dir of opts.readonlyConfigDirs ?? []) {
     if (existsSync(dir)) flags.push('--ro-bind', dir, dir);
+  }
+  for (const dir of cliBinDirs) {
+    if (flags.includes(dir)) continue;
+    flags.push('--ro-bind-try', dir, dir);
+  }
+  // Session sockets (D-Bus user bus, …) need a read-write bind — connecting
+  // over a read-only bind fails. The skeleton above created the parents.
+  for (const sock of opts.sockets ?? []) {
+    if (!sock || flags.includes(sock)) continue;
+    if (existsSync(sock)) flags.push('--bind', sock, sock);
   }
   flags.push('--tmpfs', '/root', '--setenv', 'HOME', sandboxHome(opts));
   return [...flags, '--', bin, ...args];

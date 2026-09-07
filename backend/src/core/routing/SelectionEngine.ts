@@ -6,6 +6,7 @@
 
 import type { ModelDef, ProviderName } from '@koryphaios/shared';
 import { resolveModel } from '../../providers';
+import { splitProviderKey } from '../../providers/provider-key';
 import type { TriageIntent, ModelTier, SelectionResult } from './types';
 
 const INTENT_TO_TIERS: Record<TriageIntent, ModelTier[]> = {
@@ -21,7 +22,7 @@ function normalizeChecked(checked: string[]): { modelId: string; provider: Provi
   const out: { modelId: string; provider: ProviderName }[] = [];
   for (const s of checked) {
     if (s.includes(':')) {
-      const [provider, modelId] = s.split(':');
+      const { provider, model: modelId } = splitProviderKey(s);
       if (provider && modelId)
         out.push({ modelId: modelId.trim(), provider: provider.trim() as ProviderName });
     } else {

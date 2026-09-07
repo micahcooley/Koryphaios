@@ -14,7 +14,7 @@ import {
 import { withRetry, withTimeoutSignal } from './utils';
 import { createUsageInterceptingFetch } from '../credit-accountant';
 import { providerLog } from '../logger';
-import { applyModelsDevMetadata, refreshModelsDevCache } from './models-dev';
+import { applyModelsDevMetadata, refreshModelsDevCache, modelsDevKeysFor } from './models-dev';
 import {
   enrichFromRemoteMetadata,
   isLikelyChatModelId,
@@ -169,6 +169,7 @@ export class OpenAIProvider implements Provider {
           this.cachedModels = applyModelsDevMetadata(
             this.name,
             mergeModelLists(fallback, discovered),
+            modelsDevKeysFor(this.name, this.config.kind),
           );
           providerLog.debug(
             { provider: this.name, count: this.cachedModels.length },
@@ -218,7 +219,8 @@ export class OpenAIProvider implements Provider {
       function: {
         name: t.name,
         description: t.description,
-        parameters: t.inputSchema,
+        parameters:
+          this.name === 'xai' ? sanitizeToolParametersForXAI(t.inputSchema) : t.inputSchema,
       },
     }));
 
@@ -675,6 +677,33 @@ function hasReasoningParams(params: unknown): boolean {
 function stripReasoningParams(params: unknown): void {
   const record = params as Record<string, unknown>;
   for (const key of REASONING_PARAM_KEYS) delete record[key];
+}
+
+/**
+ * xAI rejects a tool whose root schema carries `oneOf`/`anyOf` unless every
+ * branch is itself `type: object` ("tool parameter root must be an object
+ * type (root schema is an anyOf/oneOf union with a non-object branch)").
+ * Branches like `{ required: [...] }` trip it. Strip the root union — the
+ * constraint stays enforced server-side — so any present or future tool
+ * survives xAI validation.
+ */
+export function sanitizeToolParametersForXAI(
+  schema: Record<string, unknown>,
+): Record<string, unknown> {
+  if (!schema || typeof schema !== 'object' || Array.isArray(schema)) {
+    return { type: 'object', properties: {} };
+  }
+  const {
+    oneOf: _oneOf,
+    anyOf: _anyOf,
+    ...rest
+  } = schema as Record<string, unknown> & {
+    oneOf?: unknown;
+    anyOf?: unknown;
+  };
+  void _oneOf;
+  void _anyOf;
+  return { type: 'object', ...rest };
 }
 
 // ─── OpenAI-Compatible Provider Factories ───────────────────────────────────

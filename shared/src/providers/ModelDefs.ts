@@ -74,6 +74,13 @@ export interface ProviderConfig {
   hideModelSelector?: boolean;
   lastVerifiedAt?: number;
   lastVerificationScope?: 'credential' | 'account' | 'endpoint' | 'catalog' | 'runtime';
+  /**
+   * The confirmed verification state at lastVerifiedAt. Custom endpoints can
+   * never reach 'verified' (only catalog/endpoint confirmation), so the state
+   * must be stored explicitly — otherwise a restart upgrades them to
+   * 'verified' or drops them back to unconfigured.
+   */
+  lastVerificationState?: 'verified' | 'detected';
   /** Ordered list of saved account IDs for automatic fallback on failure. */
   fallbackOrder?: string[];
   /** Whether automatic fallback between selected account profiles is enabled. */

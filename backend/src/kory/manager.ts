@@ -30,6 +30,7 @@ import {
   isLegacyModel,
   getNonLegacyModels,
   withTimeoutSignal,
+  splitProviderKey,
   type StreamRequest,
   type ProviderEvent,
   type Provider,
@@ -89,10 +90,7 @@ import { join, resolve } from 'node:path';
 import { db, sessions } from '../db';
 import { eq } from 'drizzle-orm';
 import type { ISessionStore } from '../stores/session-store';
-import type {
-  IMessageStore,
-  RegenerationBranchReservation,
-} from '../stores/message-store';
+import type { IMessageStore, RegenerationBranchReservation } from '../stores/message-store';
 import type { ITaskStore } from '../stores/task-store';
 import { SnapshotManager } from './snapshot-manager';
 import { processSupervisor } from '../process-supervisor/supervisor';
@@ -127,10 +125,7 @@ import { getModeManager } from '../mode';
 import type { WorkerPipelineHost } from './services/WorkerPipelineService';
 import type { UIMode } from '@koryphaios/shared';
 import type { SessionRunCoordinator } from '../runs/session-run-coordinator';
-import {
-  ManagerRunLifecycle,
-  type ManagerRunHandle,
-} from './services/ManagerRunLifecycle';
+import { ManagerRunLifecycle, type ManagerRunHandle } from './services/ManagerRunLifecycle';
 import { ConflictError } from '../errors/types';
 import {
   CRITIC_OUTPUT_TOKEN_LIMIT,
@@ -343,13 +338,7 @@ export interface SessionTurnAdmission {
 export interface SessionTurnResult {
   readonly sessionId: string;
   readonly runId: string;
-  readonly status:
-    | 'completed'
-    | 'failed'
-    | 'cancelled'
-    | 'waiting'
-    | 'rejected'
-    | 'unknown';
+  readonly status: 'completed' | 'failed' | 'cancelled' | 'waiting' | 'rejected' | 'unknown';
   readonly phase: SessionRunPhase;
   readonly reason: string | null;
 }
@@ -467,10 +456,7 @@ export class KoryManager implements WorkerPipelineHost {
     string,
     { sessionId: string; controller: AbortController }
   >();
-  private readonly restartHandoffRetryTimers = new Map<
-    string,
-    ReturnType<typeof setTimeout>
-  >();
+  private readonly restartHandoffRetryTimers = new Map<string, ReturnType<typeof setTimeout>>();
   /** Goal state is immutable task context, not a conversational suggestion. */
   private goalContextBySession = new Map<
     string,
@@ -653,16 +639,11 @@ export class KoryManager implements WorkerPipelineHost {
         );
       } catch (error) {
         const aborted =
-          ownerController.signal.aborted ||
-          (error instanceof Error && error.name === 'AbortError');
+          ownerController.signal.aborted || (error instanceof Error && error.name === 'AbortError');
         await this.runLifecycle.finish(
           resumed.handle!,
           aborted ? 'cancel' : 'fail',
-          aborted
-            ? 'cancelled_by_user'
-            : error instanceof Error
-              ? error.message
-              : String(error),
+          aborted ? 'cancelled_by_user' : error instanceof Error ? error.message : String(error),
         );
         // Once the durable continuation is claimed, replaying a provider/tool
         // turn is unsafe: external side effects may already have happened.
@@ -1055,11 +1036,7 @@ export class KoryManager implements WorkerPipelineHost {
         await this.runLifecycle.finish(
           handle,
           cancelled ? 'cancel' : 'fail',
-          cancelled
-            ? 'cancelled_by_user'
-            : error instanceof Error
-              ? error.message
-              : String(error),
+          cancelled ? 'cancelled_by_user' : error instanceof Error ? error.message : String(error),
         );
       }
       throw error;
@@ -1357,20 +1334,12 @@ export class KoryManager implements WorkerPipelineHost {
     if (!this.runs || !this.sessions || !this.messages) return;
     if (signal.aborted) return;
     const LEASE_MS = 30_000;
-    const claimed = this.runs.claimRestartHandoff(
-      handoffId,
-      this.restartHandoffOwner,
-      LEASE_MS,
-    );
+    const claimed = this.runs.claimRestartHandoff(handoffId, this.restartHandoffOwner, LEASE_MS);
     if (!claimed) return;
     const userMessageId = `restart-user-${claimed.id}`;
     const responseMessageId = `restart-response-${claimed.id}`;
     const renew = setInterval(() => {
-      const renewed = this.runs?.renewRestartHandoff(
-        claimed.id,
-        claimed.claimToken,
-        LEASE_MS,
-      );
+      const renewed = this.runs?.renewRestartHandoff(claimed.id, claimed.claimToken, LEASE_MS);
       if (!renewed) clearInterval(renew);
     }, LEASE_MS / 3);
     renew.unref?.();
@@ -1415,10 +1384,7 @@ export class KoryManager implements WorkerPipelineHost {
         if (requeued) this.scheduleRestartHandoffRetry(claimed.id, claimed.attemptCount);
         return;
       }
-      admission = await this.reserveSessionTurn(
-        claimed.sessionId,
-        'user_input_after_restart',
-      );
+      admission = await this.reserveSessionTurn(claimed.sessionId, 'user_input_after_restart');
       if (signal.aborted) {
         if (admission) {
           await this.cancelSessionTurn(admission, 'restart_handoff_cancelled_before_dispatch');
@@ -1477,10 +1443,7 @@ export class KoryManager implements WorkerPipelineHost {
       });
       admission = null;
       const outcome = await work;
-      const responsePersisted = await this.messages.getById(
-        claimed.sessionId,
-        responseMessageId,
-      );
+      const responsePersisted = await this.messages.getById(claimed.sessionId, responseMessageId);
       if (
         responsePersisted ||
         (outcome.status === 'waiting' && outcome.phase === 'waiting_terminal')
@@ -1496,9 +1459,10 @@ export class KoryManager implements WorkerPipelineHost {
       );
     } catch (error) {
       if (admission) {
-        await (signal.aborted
-          ? this.cancelSessionTurn(admission, 'restart_handoff_cancelled_before_dispatch')
-          : this.rejectSessionTurn(admission, 'restart_handoff_dispatch_failed')
+        await (
+          signal.aborted
+            ? this.cancelSessionTurn(admission, 'restart_handoff_cancelled_before_dispatch')
+            : this.rejectSessionTurn(admission, 'restart_handoff_dispatch_failed')
         ).catch(() => undefined);
       }
       if (signal.aborted) return;
@@ -1510,11 +1474,7 @@ export class KoryManager implements WorkerPipelineHost {
           `${reason}; replacement execution had already started`,
         );
       } else {
-        const requeued = this.runs.requeueRestartHandoff(
-          claimed.id,
-          claimed.claimToken,
-          reason,
-        );
+        const requeued = this.runs.requeueRestartHandoff(claimed.id, claimed.claimToken, reason);
         if (requeued) this.scheduleRestartHandoffRetry(claimed.id, claimed.attemptCount);
       }
       throw error;
@@ -1596,7 +1556,9 @@ export class KoryManager implements WorkerPipelineHost {
       ...binding,
     });
     if (review.status !== 'pending') {
-      throw new ConflictError('This change review was resolved while its projection was being prepared.');
+      throw new ConflictError(
+        'This change review was resolved while its projection was being prepared.',
+      );
     }
     const payload: KorySessionChangesPayload = {
       changes: review.changes,
@@ -1606,15 +1568,15 @@ export class KoryManager implements WorkerPipelineHost {
     return review;
   }
 
-  private emitSessionReviewResolution(
-    sessionId: string,
-    review: DurableSessionReview,
-  ): void {
+  private emitSessionReviewResolution(sessionId: string, review: DurableSessionReview): void {
     const payload: KorySessionChangesResolvedPayload = {
       reviewId: review.reviewId,
-      status: review.status === 'accepted' || review.status === 'rejected' || review.status === 'terminalized'
-        ? review.status
-        : 'terminalized',
+      status:
+        review.status === 'accepted' ||
+        review.status === 'rejected' ||
+        review.status === 'terminalized'
+          ? review.status
+          : 'terminalized',
       ...(review.resolutionReason ? { reason: review.resolutionReason } : {}),
     };
     this.emitWSMessage(sessionId, 'session.changes_resolved', payload);
@@ -1706,9 +1668,7 @@ export class KoryManager implements WorkerPipelineHost {
       if (review.rollback.kind !== 'git') {
         const terminalized = await terminalizeSessionReview(review, review.rollback.reason);
         if (terminalized) this.emitSessionReviewResolution(sessionId, terminalized);
-        throw new Error(
-          `Koryphaios cannot safely reject this review: ${review.rollback.reason}`,
-        );
+        throw new Error(`Koryphaios cannot safely reject this review: ${review.rollback.reason}`);
       }
       const baselineHash = review.rollback.baselineHash;
 
@@ -2176,7 +2136,8 @@ export class KoryManager implements WorkerPipelineHost {
       regenerationBranch: input.regenerationBranch ?? null,
     });
     const matchesCommandUser = (message: StoredMessage | undefined): boolean => {
-      if (!message || message.role !== 'user' || message.content !== input.userMessage) return false;
+      if (!message || message.role !== 'user' || message.content !== input.userMessage)
+        return false;
       const stored = message.attachments ?? [];
       const expected = commandAttachments ?? [];
       return (
@@ -2887,7 +2848,7 @@ export class KoryManager implements WorkerPipelineHost {
     }
 
     if (preferredModel && preferredModel !== 'auto' && preferredModel.includes(':')) {
-      const [providerName, modelId] = preferredModel.split(':');
+      const { provider: providerName, model: modelId } = splitProviderKey(preferredModel);
       if (providerName && modelId) {
         const selectedProvider = authenticated.find((provider) => provider.name === providerName);
         if (!selectedProvider || !selectedProvider.models.includes(modelId)) {
@@ -5628,9 +5589,7 @@ export class KoryManager implements WorkerPipelineHost {
       processSupervisor.cancelAgentBackgroundProcessesForSession(sessionId),
     ];
     if (!locallyOwned) {
-      cancellationWork.push(
-        this.runLifecycle.cancelCurrent(sessionId, 'cancelled_by_user'),
-      );
+      cancellationWork.push(this.runLifecycle.cancelCurrent(sessionId, 'cancelled_by_user'));
     }
     const results = await Promise.allSettled(cancellationWork);
     const failures = results.filter(
@@ -5660,9 +5619,7 @@ export class KoryManager implements WorkerPipelineHost {
   /** Process-wait wakeups must ignore the durable wait they are resuming, but
    * still respect every process-local owner and mutation gate. */
   isLocallyBlockedForProcessWake(sessionId: string): boolean {
-    return (
-      this.sessionMutationBarriers.has(sessionId) || this.hasActiveSessionExecution(sessionId)
-    );
+    return this.sessionMutationBarriers.has(sessionId) || this.hasActiveSessionExecution(sessionId);
   }
 
   /** Destructive/external callers need both local and durable lifecycle truth. */
@@ -5744,9 +5701,11 @@ export class KoryManager implements WorkerPipelineHost {
     boundaryMessageId?: string,
   ): Promise<InternalMessage[]> {
     return (
-      (await (boundaryMessageId
-        ? this.messages?.getContextMessagesAtBoundary(sessionId, boundaryMessageId, 1000)
-        : this.messages?.getContextMessages(sessionId, 1000)))
+      (
+        await (boundaryMessageId
+          ? this.messages?.getContextMessagesAtBoundary(sessionId, boundaryMessageId, 1000)
+          : this.messages?.getContextMessages(sessionId, 1000))
+      )
         // System rows are UI markers (e.g. "Stopped by user.") — never part of
         // the conversation sent back to the model.
         ?.filter((m) => m.role !== 'system' || m.content.startsWith('[KORY_COMPACTION]'))
@@ -5825,7 +5784,9 @@ export class KoryManager implements WorkerPipelineHost {
     // active. It therefore acquires its own durable, cancellable SessionRun.
     const admission = await this.reserveSessionTurn(sessionId, 'agent_followup_turn');
     if (!admission) {
-      throw new ConflictError('Wait for chat lifecycle work to finish before messaging this agent.');
+      throw new ConflictError(
+        'Wait for chat lifecycle work to finish before messaging this agent.',
+      );
     }
     let dispatched = false;
     try {
@@ -5840,8 +5801,7 @@ export class KoryManager implements WorkerPipelineHost {
       // Same controls as the manager: the user can retarget a sub-agent's model
       // and reasoning tier per message (picker value is "provider:modelId").
       if (options?.model && options.model !== 'auto') {
-        const [prov, ...rest] = options.model.split(':');
-        const bareModel = rest.join(':');
+        const { provider: prov, model: bareModel } = splitProviderKey(options.model);
         if (prov && bareModel) {
           thread.providerName = prov as ProviderName;
           thread.modelId = bareModel;
@@ -5894,9 +5854,10 @@ export class KoryManager implements WorkerPipelineHost {
     } catch (error) {
       thread.busy = false;
       if (!dispatched && this.turnAdmissions.has(admission)) {
-        await (admission.signal.aborted
-          ? this.cancelSessionTurn(admission, 'agent_followup_cancelled_before_dispatch')
-          : this.rejectSessionTurn(admission, 'agent_followup_dispatch_failed')
+        await (
+          admission.signal.aborted
+            ? this.cancelSessionTurn(admission, 'agent_followup_cancelled_before_dispatch')
+            : this.rejectSessionTurn(admission, 'agent_followup_dispatch_failed')
         ).catch((settleError) => {
           koryLog.error(
             { sessionId, agentId, settleError },

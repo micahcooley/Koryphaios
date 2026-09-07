@@ -7,7 +7,7 @@ import { type Provider, type ProviderEvent, type StreamRequest, resolveModel } f
 import { GEMINI_V1BETA_BASE } from './api-endpoints';
 import { withRetry } from './utils';
 import { isModelListCacheFresh, mergeModelLists, modelFromRemoteId } from './model-list-cache';
-import { applyModelsDevMetadata, warmModelsDevCache } from './models-dev';
+import { applyModelsDevMetadata, warmModelsDevCache, modelsDevKeysFor } from './models-dev';
 import { providerLog } from '../logger';
 import { safeProviderDiagnostic, safeProviderFailureMessage } from './provider-diagnostics';
 
@@ -182,6 +182,7 @@ export class GoogleProvider implements Provider {
         this.cachedModels = applyModelsDevMetadata(
           this.name,
           mergeModelLists(fallback, discovered),
+          modelsDevKeysFor(this.name, this.config.kind),
         );
         providerLog.debug(
           { provider: this.name, count: this.cachedModels.length },

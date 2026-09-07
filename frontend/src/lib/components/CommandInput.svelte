@@ -429,12 +429,14 @@
     return preferred?.name ?? 'anthropic';
   });
 
+  let providerNames = $derived(wsStore.providers.map((p) => p.name));
+
   let currentProvider = $derived(
     !selectedModel
       ? fallbackProvider
-      : (parseProviderModelSelection(selectedModel).provider ?? fallbackProvider),
+      : (parseProviderModelSelection(selectedModel, providerNames).provider ?? fallbackProvider),
   );
-  let currentModel = $derived(parseProviderModelSelection(selectedModel).model);
+  let currentModel = $derived(parseProviderModelSelection(selectedModel, providerNames).model);
 
   /** A model's own live-reported effort levels (e.g. Codex's supported_reasoning_levels)
    *  are the sole source of reasoning config. There are no static fallback tables —
@@ -682,7 +684,7 @@
     const value = selectedModel;
     const providers = wsStore.providers;
     if (!value || value === 'auto' || providers.length === 0) return;
-    const { provider, model } = parseProviderModelSelection(value);
+    const { provider, model } = parseProviderModelSelection(value, providerNames);
     if (!provider || !model || isEnabledModelSelection(providers, value)) return;
     selectedModel = '';
     if (typeof localStorage !== 'undefined') localStorage.removeItem(MODEL_STORAGE_KEY);
@@ -721,7 +723,7 @@
 
   let selectedModelLabel = $derived.by(() => {
     if (!selectedModel) return 'Select model';
-    const parsed = parseProviderModelSelection(selectedModel);
+    const parsed = parseProviderModelSelection(selectedModel, providerNames);
     if (!parsed.model || !parsed.provider) return selectedModel;
     const provider = wsStore.providers.find((p) => p.name === parsed.provider);
     const catalog = (provider as any)?.allAvailableModels as
@@ -739,7 +741,7 @@
     if (contextImagePreview?.sessionId !== sid) contextImagePreview = null;
     const generation = ++contextPreviewGeneration;
     const target = availableModels.find((m) => m.value === value);
-    const { provider, model } = parseProviderModelSelection(value);
+    const { provider, model } = parseProviderModelSelection(value, providerNames);
     if (!provider || !model) {
       wsStore.clearManagerContextPreview(sid);
       return;
@@ -1065,7 +1067,7 @@
   async function authoritativeContextImageCount(modelValue: string): Promise<number> {
     if (disableModelPreviewRequests) return visibleTranscriptImageCount();
     const sid = sessionStore.activeSessionId;
-    const { provider, model } = parseProviderModelSelection(modelValue);
+    const { provider, model } = parseProviderModelSelection(modelValue, providerNames);
     if (!sid || !provider || !model) return visibleTranscriptImageCount();
     try {
       const response = await apiFetch(apiUrl(`/api/sessions/${sid}/context/model-preview`), {
@@ -1596,7 +1598,8 @@
     showModelPicker = true;
     modelSearchQuery = '';
     if (selectedModel) {
-      const provider = parseProviderModelSelection(selectedModel).provider ?? currentProvider;
+      const provider =
+        parseProviderModelSelection(selectedModel, providerNames).provider ?? currentProvider;
       expandedProviders = new Set(provider ? [provider] : []);
     } else if (groupedModels.length === 1) {
       expandedProviders = new Set([groupedModels[0].provider]);

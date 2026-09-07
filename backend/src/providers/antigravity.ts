@@ -104,6 +104,24 @@ export function antigravityHelpSupportsPrivatePromptFile(help: string): boolean 
   return /(?:^|\s)--(?:prompt-file|input-format|output-format)(?:\s|=|<)/m.test(help);
 }
 
+/** Host D-Bus user-bus endpoint for OS-keyring OAuth inside the jail. agy
+ *  keeps its Google OAuth tokens in the login keyring (libsecret), not on
+ *  disk — without the bus it reports "Please sign in" despite a valid login.
+ *  Returns null when no path-based bus exists (abstract-only addresses cannot
+ *  be bind-mounted); the turn then fails with agy's own sign-in message. */
+function hostUserBusSocket(): {
+  socket: string;
+  address: string;
+  runtimeDir: string;
+} | null {
+  const runtimeDir = process.env.XDG_RUNTIME_DIR;
+  const address = process.env.DBUS_SESSION_BUS_ADDRESS;
+  const fromAddress = address ? /path=([^;,]+)/.exec(address)?.[1] : undefined;
+  const socket = fromAddress ?? (runtimeDir ? join(runtimeDir, 'bus') : undefined);
+  if (!socket || !runtimeDir || !existsSync(socket)) return null;
+  return { socket, address: address ?? `unix:path=${socket}`, runtimeDir };
+}
+
 function supportsPrivateTransport(bin: string): boolean {
   if (cachedPrivatePromptFileSupport !== undefined) return cachedPrivatePromptFileSupport;
   try {
@@ -121,21 +139,50 @@ function supportsPrivateTransport(bin: string): boolean {
   return cachedPrivatePromptFileSupport;
 }
 
+/** Data roots holding agy conversations/transcripts. The child runs with
+ *  ANTIGRAVITY_HOME/HOME pointed at the isolated managed home, so Kory-spawned
+ *  turns land there — not under the real login home. Scan both (isolated
+ *  first) so Kory-created turns are found while the user's own agy usage
+ *  stays visible too. */
+function agyDataRoots(): string[] {
+  const isolated = join(getKoryphaiosAntigravityHome(), '.gemini', 'antigravity-cli');
+  const real = join(homedir(), '.gemini', 'antigravity-cli');
+  return isolated === real ? [real] : [isolated, real];
+}
+
+function agyConvDirs(): string[] {
+  return agyDataRoots().map((root) => join(root, 'conversations'));
+}
+
+function agyBrainDirs(): string[] {
+  return agyDataRoots().map((root) => join(root, 'brain'));
+}
+
+/** Resolve a conversation db by id, preferring the isolated managed home. */
+function agyConvDb(convId: string): string | null {
+  for (const dir of agyConvDirs()) {
+    const file = join(dir, `${convId}.db`);
+    if (existsSync(file)) return file;
+  }
+  return null;
+}
+
 /** Snapshot conversation ids currently on disk. */
 function listConversationIds(): Set<string> {
-  try {
-    return new Set(
-      readdirSync(AGY_CONV_DIR)
-        .filter((f) => f.endsWith('.db'))
-        .map((f) => f.slice(0, -3)),
-    );
-  } catch (err: unknown) {
-    providerLog.debug(
-      { err: err instanceof Error ? err.message : String(err) },
-      'failed to list agy conversation ids',
-    );
-    return new Set();
+  const ids = new Set<string>();
+  for (const dir of agyConvDirs()) {
+    try {
+      for (const f of readdirSync(dir)) {
+        if (f.endsWith('.db')) ids.add(f.slice(0, -3));
+      }
+    } catch (err: unknown) {
+      providerLog.debug(
+        { err: err instanceof Error ? err.message : String(err) },
+        'failed to list agy conversation ids',
+      );
+    }
   }
+  return ids;
 }
 
 /** The conversation Koryphaios's agy just created — the NEWEST db that wasn't
@@ -145,20 +192,30 @@ function listConversationIds(): Set<string> {
 function detectNewConversation(before: Set<string>): string | null {
   let best: string | null = null;
   let bestMtime = -1;
-  for (const id of listConversationIds()) {
-    if (before.has(id)) continue;
+  for (const dir of agyConvDirs()) {
+    let files: string[];
     try {
-      const mt = statSync(join(AGY_CONV_DIR, `${id}.db`)).mtimeMs;
-      if (mt > bestMtime) {
-        bestMtime = mt;
-        best = id;
+      files = readdirSync(dir);
+    } catch {
+      continue;
+    }
+    for (const f of files) {
+      if (!f.endsWith('.db')) continue;
+      const id = f.slice(0, -3);
+      if (before.has(id)) continue;
+      try {
+        const mt = statSync(join(dir, f)).mtimeMs;
+        if (mt > bestMtime) {
+          bestMtime = mt;
+          best = id;
+        }
+      } catch (err: unknown) {
+        providerLog.debug(
+          { err: err instanceof Error ? err.message : String(err) },
+          'raced away reading conversation mtime',
+        );
+        /* raced away */
       }
-    } catch (err: unknown) {
-      providerLog.debug(
-        { err: err instanceof Error ? err.message : String(err) },
-        'raced away reading conversation mtime',
-      );
-      /* raced away */
     }
   }
   return best;
@@ -620,7 +677,7 @@ export class AntigravityProvider implements Provider {
     ) {
       sessionConversations.delete(request.sessionId);
     }
-    if (convId && !existsSync(join(AGY_CONV_DIR, `${convId}.db`))) {
+    if (convId && !agyConvDb(convId)) {
       // agy pruned it — start a fresh conversation with full history.
       if (request.sessionId) sessionConversations.delete(request.sessionId);
       convId = undefined;
@@ -755,15 +812,31 @@ export class AntigravityProvider implements Provider {
 
     // Run in the session's project directory when one is set so the CLI sees
     // the real workspace; fall back to a neutral temp dir otherwise.
+    // OS-keyring OAuth: agy's tokens live behind the D-Bus user bus, so the
+    // jailed child needs the address, the runtime dir, and the bound socket.
+    const userBus = hostUserBusSocket();
     const baseEnv = buildProviderCliEnv('antigravity', {
       HOME: agyHome,
       USERPROFILE: agyHome,
       ANTIGRAVITY_HOME: agyHome,
+      ...(userBus
+        ? {
+            DBUS_SESSION_BUS_ADDRESS: userBus.address,
+            XDG_RUNTIME_DIR: userBus.runtimeDir,
+          }
+        : {}),
     });
     const jail = request.sandbox ? buildSoftJail(baseEnv, [agyHome]) : null;
+    // The isolated home carries symlinks to the real ~/.gemini OAuth material,
+    // so the real config dir must be visible read-only inside the jail or the
+    // links dangle and agy reports "Please sign in". homeDir keeps bwrap HOME
+    // on the isolated home (where .claude.json/MCP wiring was just written)
+    // instead of defaulting to the project directory.
+    const realGeminiDir = join(homedir(), '.gemini');
     const wrapped = request.sandbox
       ? wrapCommand(bin, args, {
           cwd: cwd || tmpdir(),
+          homeDir: agyHome,
           configDirs: [
             agyHome,
             ...(bridgeGrantDirectory ? [bridgeGrantDirectory] : []),
@@ -771,6 +844,8 @@ export class AntigravityProvider implements Provider {
             logArtifact.directory,
             ...attachmentScope.artifacts.map((artifact) => artifact.directory),
           ],
+          readonlyConfigDirs: existsSync(realGeminiDir) ? [realGeminiDir] : [],
+          sockets: userBus ? [userBus.socket] : [],
           policy: request.sandbox,
         })
       : { command: bin, args };
@@ -1034,9 +1109,6 @@ function* chunkText(text: string): Generator<ProviderEvent> {
 // Koryphaios the same real-time visibility the Antigravity app has, from the
 // CLI's own artifacts (no API access, no auth games).
 
-const AGY_BRAIN_DIR = join(homedir(), '.gemini', 'antigravity-cli', 'brain');
-const AGY_CONV_DIR = join(homedir(), '.gemini', 'antigravity-cli', 'conversations');
-
 // ── Trajectory thinking extraction ──────────────────────────────────────────
 // The reasoning text ("collapsible thinking" in the Antigravity app) is NOT in
 // the JSONL transcript — it lives in the conversation trajectory SQLite, in
@@ -1135,7 +1207,8 @@ function newTrajectoryTail(convId?: string): TrajectoryTailState {
   // Resuming an existing conversation: its db already holds every prior turn's
   // steps — seed past them so old reasoning isn't replayed into this turn.
   if (convId) {
-    const file = join(AGY_CONV_DIR, `${convId}.db`);
+    const file = agyConvDb(convId);
+    if (!file) return state;
     try {
       const { Database } = require('bun:sqlite') as typeof import('bun:sqlite');
       const db = new Database(file, { readonly: true });
@@ -1173,13 +1246,20 @@ function drainTrajectoryThinking(state: TrajectoryTailState): ProviderEvent[] {
   let dbs: string[] = [];
   if (state.convId) {
     // Exact conversation known — no mtime-window guessing across all dbs.
-    const f = join(AGY_CONV_DIR, `${state.convId}.db`);
-    if (existsSync(f)) dbs = [f];
+    const f = agyConvDb(state.convId);
+    if (f) dbs = [f];
   } else {
     try {
-      dbs = readdirSync(AGY_CONV_DIR)
-        .filter((f) => f.endsWith('.db'))
-        .map((f) => join(AGY_CONV_DIR, f))
+      dbs = agyConvDirs()
+        .flatMap((dir) => {
+          try {
+            return readdirSync(dir)
+              .filter((f) => f.endsWith('.db'))
+              .map((f) => join(dir, f));
+          } catch {
+            return [];
+          }
+        })
         .filter((f) => {
           if (state.finalizedIdx.has(f)) return true;
           try {
@@ -1268,7 +1348,11 @@ interface TranscriptTailState {
 }
 
 function transcriptPath(convId: string): string {
-  return join(AGY_BRAIN_DIR, convId, '.system_generated', 'logs', 'transcript_full.jsonl');
+  for (const brainDir of agyBrainDirs()) {
+    const candidate = join(brainDir, convId, '.system_generated', 'logs', 'transcript_full.jsonl');
+    if (existsSync(candidate)) return candidate;
+  }
+  return join(agyBrainDirs()[0], convId, '.system_generated', 'logs', 'transcript_full.jsonl');
 }
 
 function newTranscriptTail(stdoutSoFar: () => string, convId?: string): TranscriptTailState {
@@ -1302,9 +1386,19 @@ function findLiveTranscripts(state: TranscriptTailState): string[] {
     return existsSync(f) ? [f] : [];
   }
   const out: string[] = [];
-  try {
-    for (const id of readdirSync(AGY_BRAIN_DIR)) {
-      const f = join(AGY_BRAIN_DIR, id, '.system_generated', 'logs', 'transcript_full.jsonl');
+  for (const brainDir of agyBrainDirs()) {
+    let ids: string[];
+    try {
+      ids = readdirSync(brainDir);
+    } catch (err: unknown) {
+      providerLog.debug(
+        { err: err instanceof Error ? err.message : String(err) },
+        'brain dir absent — older agy or different install',
+      );
+      continue;
+    }
+    for (const id of ids) {
+      const f = join(brainDir, id, '.system_generated', 'logs', 'transcript_full.jsonl');
       try {
         if (state.offsets.has(f) || statSync(f).mtimeMs >= state.spawnedAt - 2_000) out.push(f);
       } catch (err: unknown) {
@@ -1315,12 +1409,6 @@ function findLiveTranscripts(state: TranscriptTailState): string[] {
         /* no transcript in this brain dir */
       }
     }
-  } catch (err: unknown) {
-    providerLog.debug(
-      { err: err instanceof Error ? err.message : String(err) },
-      'brain dir absent — older agy or different install',
-    );
-    /* brain dir absent — older agy or different install */
   }
   return out;
 }

@@ -7,6 +7,7 @@
 
 import type { WorkerDomain, ProviderName, KoryphaiosConfig } from '@koryphaios/shared';
 import { resolveModel, isLegacyModel, getNonLegacyModels } from '../../providers';
+import { splitProviderKey } from '../../providers/provider-key';
 import { DOMAIN } from '../../constants';
 import type { ProviderRegistry } from '../../providers/registry';
 import { SmartRouterService } from './SmartRouterService';
@@ -17,16 +18,12 @@ export interface RoutingDecision {
 }
 
 /**
- * Split a `provider:model` string on the first colon only, preserving colons
- * in the model part (e.g. `codex:codex-account:YWNjb3VudA:gpt-5.6-sol`).
+ * Split a `provider:model` string, preserving colons in the model part (e.g.
+ * `codex:codex-account:YWNjb3VudA:gpt-5.6-sol`) and the `custom:<slug>` key
+ * prefix of user-defined providers (e.g. `custom:my-llm:my-model-a`).
  */
 export function splitProviderModel(value: string): { provider: ProviderName; model: string } {
-  const idx = value.indexOf(':');
-  if (idx < 0) return { provider: value as ProviderName, model: value };
-  return {
-    provider: value.slice(0, idx) as ProviderName,
-    model: value.slice(idx + 1),
-  };
+  return splitProviderKey(value);
 }
 
 export interface RoutingServiceEnhancedConfig {

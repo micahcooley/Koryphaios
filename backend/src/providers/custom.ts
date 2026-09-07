@@ -12,6 +12,7 @@ import { type Provider, type ProviderEvent, type StreamRequest, createGenericMod
 import { OpenAIProvider } from './openai';
 import { AnthropicProvider } from './anthropic';
 import { GoogleProvider } from './google';
+import { applyModelsDevMetadata, refreshModelsDevCache, modelsDevKeysFor } from './models-dev';
 
 export type CustomProviderKind = 'openai' | 'anthropic' | 'gemini';
 
@@ -307,11 +308,17 @@ export class CustomProvider implements Provider {
       seen.add(m.id);
       merged.push(m);
     }
-    return merged;
+    // Custom endpoints report bare ids only. Enrich through the wire-format
+    // family (models.dev lab entries) so reasoning levels, real context
+    // windows, and output limits resolve exactly like first-party providers.
+    // Enrichment only fills in fields for ids the catalog actually carries —
+    // unknown ids stay generic rather than invented.
+    return applyModelsDevMetadata(this.name, merged, modelsDevKeysFor(this.name, this.config.kind));
   }
 
   refreshModels(forceRefresh = false): void | Promise<unknown> {
     this.catalogRefreshRequested = true;
+    refreshModelsDevCache();
     return this.inner.refreshModels?.(forceRefresh);
   }
 

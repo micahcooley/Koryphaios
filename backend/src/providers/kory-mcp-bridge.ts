@@ -304,7 +304,7 @@ export const KORY_TOOLS: KoryToolDef[] = [
   {
     name: 'kory__query_note_base',
     description:
-      'Query an existing saved project Base by ID or unique name with bounded deterministic pagination.',
+      'Query an existing saved project Base by ID or unique name with bounded deterministic pagination. Exactly one of baseId or baseName is required (enforced server-side).',
     inputSchema: {
       type: 'object',
       additionalProperties: false,
@@ -314,7 +314,6 @@ export const KORY_TOOLS: KoryToolDef[] = [
         limit: { type: 'integer', minimum: 1, maximum: 100 },
         offset: { type: 'integer', minimum: 0, maximum: 100000 },
       },
-      oneOf: [{ required: ['baseId'] }, { required: ['baseName'] }],
     },
     role: 'any',
   },

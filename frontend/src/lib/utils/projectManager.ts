@@ -182,6 +182,13 @@ export function addRecentProject(
   return updated;
 }
 
+/** Remove a single recent-project entry by id. Persists and returns the list. */
+export function removeRecentProject(projects: RecentProject[], id: string): RecentProject[] {
+  const updated = projects.filter((p) => p.id !== id);
+  if (updated.length !== projects.length) persistRecentProjects(updated);
+  return updated;
+}
+
 /** Creates a blank project session. Opening a folder must never trigger an
  * unsolicited model run; the project remains available through its working directory. */
 export async function createProjectSession(title: string, text: string): Promise<string | null> {

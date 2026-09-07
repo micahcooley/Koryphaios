@@ -16,8 +16,35 @@ function formatProviderName(provider: string): string {
   return provider.charAt(0).toUpperCase() + provider.slice(1);
 }
 
-export function parseProviderModelSelection(value?: string): { provider?: string; model?: string } {
+export function parseProviderModelSelection(
+  value?: string,
+  providerNames?: Iterable<string>,
+): { provider?: string; model?: string } {
   if (!value || value === 'auto') return {};
+  // Custom provider keys are `custom:<slug>` and therefore contain a colon, so
+  // a naive first-colon split yields provider `custom` plus garbage. Prefer an
+  // exact longest-prefix match against the known provider list when available.
+  if (providerNames) {
+    let best: string | undefined;
+    for (const name of providerNames) {
+      if (!name) continue;
+      if (value === name || value.startsWith(`${name}:`)) {
+        if (!best || name.length > best.length) best = name;
+      }
+    }
+    if (best) {
+      const rest = value.slice(best.length + 1);
+      return rest ? { provider: best, model: rest } : {};
+    }
+  }
+  // Fallback without a provider list: only `custom:` keys contain a colon, and
+  // their slug never does, so the model starts after the second colon.
+  if (value.startsWith('custom:')) {
+    const separator = value.indexOf(':', 'custom:'.length);
+    if (separator === -1) return {};
+    const model = value.slice(separator + 1);
+    return model ? { provider: value.slice(0, separator), model } : {};
+  }
   const separator = value.indexOf(':');
   if (separator === -1) return {};
   return {
@@ -40,7 +67,10 @@ export function canAttemptProvider(provider: ProviderInfo): boolean {
  * while a manual choice must never silently point at a disabled model.
  */
 export function isEnabledModelSelection(providers: ProviderInfo[], value?: string): boolean {
-  const { provider, model } = parseProviderModelSelection(value);
+  const { provider, model } = parseProviderModelSelection(
+    value,
+    providers.map((item) => item.name),
+  );
   if (!provider || !model) return false;
   const selectedProvider = providers.find((item) => item.name === provider);
   return (
@@ -59,7 +89,10 @@ export function getModelConfigurationWarning(
     return 'No provider is configured. Open Settings → Providers and configure one before chatting.';
   }
 
-  const { provider, model } = parseProviderModelSelection(preferredModel);
+  const { provider, model } = parseProviderModelSelection(
+    preferredModel,
+    providers.map((item) => item.name),
+  );
   if (provider && model) {
     if (!isEnabledModelSelection(providers, preferredModel)) {
       return `${model} is no longer available for ${formatProviderName(provider)}. Select another model in the composer.`;

@@ -9,14 +9,7 @@
  */
 
 export type NativeCliProvider =
-  | 'claude'
-  | 'codex'
-  | 'cline'
-  | 'cursor'
-  | 'devin'
-  | 'antigravity'
-  | 'grok'
-  | 'freebuff';
+  'claude' | 'codex' | 'cline' | 'cursor' | 'devin' | 'antigravity' | 'grok' | 'freebuff';
 
 const PROCESS_ENV_KEYS = [
   // Executable discovery and Windows process startup.
@@ -131,6 +124,11 @@ const PROVIDER_ENV_KEYS: Record<NativeCliProvider, readonly string[]> = {
     'GEMINI_API_KEY',
     'HOME',
     'USERPROFILE',
+    // agy keeps OAuth tokens in the OS keyring; the jailed child reaches it
+    // over the D-Bus user bus, so both the address and the runtime dir must
+    // flow through (the socket itself is bound via WrapOptions.sockets).
+    'DBUS_SESSION_BUS_ADDRESS',
+    'XDG_RUNTIME_DIR',
   ],
   grok: ['GROK_CODE_XAI_API_KEY', 'XAI_API_KEY', 'GROK_HOME'],
   // Authentication is copied into the PTY adapter's private HOME. Never pass
