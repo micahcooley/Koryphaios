@@ -60,26 +60,48 @@ interface AgyUsageResponse {
  *  Returns the parsed quota groups, or null if the CLI is unavailable or the
  *  command fails. The caller maps models to groups and attaches the more
  *  restrictive (lower) of the weekly and 5-hour remaining fractions. */
-export async function fetchAntigravityQuotaGroups(): Promise<AntigravityQuotaGroup[] | null> {
+export async function fetchAntigravityQuotaGroups(
+  timeoutMs = 8_000,
+): Promise<AntigravityQuotaGroup[] | null> {
   const bin = whichBinary('agy');
   if (!bin) return null;
 
   return new Promise((resolve) => {
+    let settled = false;
+    const finish = (value: AntigravityQuotaGroup[] | null) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(value);
+    };
     const child = spawn(bin, ['--print', '/usage', '--output-format', 'json'], {
       stdio: ['ignore', 'pipe', 'ignore'],
       env: getSafeSubprocessEnv(),
     });
 
+    // The agy CLI can hang on network/auth prompts. Never let one stuck
+    // quota probe block the whole Billing CLI-usage scan.
+    const timer = setTimeout(() => {
+      try {
+        child.kill('SIGTERM');
+      } catch {
+        // Process already exited; resolving null below is sufficient.
+      }
+      providerLog.debug('antigravity-quota: /usage timed out, resolving null');
+      finish(null);
+    }, timeoutMs);
+    timer.unref?.();
+
     let out = '';
     child.stdout.on('data', (c: Buffer) => (out += c.toString()));
-    child.once('error', () => resolve(null));
+    child.once('error', () => finish(null));
     child.once('exit', () => {
       try {
         const parsed = JSON.parse(out) as AgyUsageResponse;
         const groups = parsed.command?.data?.groups;
         if (!groups || groups.length === 0) {
           providerLog.debug('antigravity-quota: /usage returned no groups');
-          resolve(null);
+          finish(null);
           return;
         }
         const mapped: AntigravityQuotaGroup[] = groups.map((g) => ({
@@ -97,13 +119,13 @@ export async function fetchAntigravityQuotaGroups(): Promise<AntigravityQuotaGro
           { groups: mapped.map((g) => g.name) },
           'antigravity-quota: fetched live quota groups',
         );
-        resolve(mapped);
+        finish(mapped);
       } catch (err: unknown) {
         providerLog.debug(
           { err: err instanceof Error ? err.message : String(err) },
           'antigravity-quota: failed to parse /usage response',
         );
-        resolve(null);
+        finish(null);
       }
     });
   });

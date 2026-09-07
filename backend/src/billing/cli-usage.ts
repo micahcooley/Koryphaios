@@ -149,6 +149,24 @@ const WINDOWS_MS: Array<[string, number]> = [
 ];
 const SCAN_HORIZON_MS = 31 * 24 * 60 * 60 * 1000;
 const DAY_MS = 24 * 60 * 60 * 1000;
+// No single CLI reader may block Billing forever. Spawned CLIs (agy /usage,
+// Codex app-server) and large session trees can stall; a hung reader resolves
+// to null so the remaining subscriptions still index. The Codex app-server
+// allows 30s per RPC, so keep this above that to avoid cutting off a slow but
+// healthy Codex probe.
+const READER_TIMEOUT_MS = 45_000;
+const MODEL_REFRESH_TIMEOUT_MS = 8_000;
+
+function withTimeout<T>(work: Promise<T>, ms: number): Promise<T | null> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<null>((resolve) => {
+    timer = setTimeout(() => resolve(null), ms);
+    timer.unref?.();
+  });
+  return Promise.race([work, timeout]).finally(() => {
+    if (timer) clearTimeout(timer);
+  });
+}
 
 // Kimi Code's wire.jsonl StatusUpdate events don't carry a per-turn model
 // name. The kimi CLI's config.toml has default_model = "" (API default). We
@@ -1657,7 +1675,7 @@ async function readFreebuff(now: number): Promise<CliUsageReport | null> {
   try {
     const provider = getContext().providers.get('freebuff');
     if (provider) {
-      await provider.refreshModels?.();
+      await withTimeout(Promise.resolve(provider.refreshModels?.()), MODEL_REFRESH_TIMEOUT_MS);
       models = provider.listModels();
       providerAvailable = provider.isAvailable();
     }
@@ -1889,7 +1907,14 @@ async function collectCliUsageReports(opts?: {
     readFreebuff,
     ...unavailableReaders,
   ];
-  const results = await Promise.allSettled(readers.map((reader) => reader(now)));
+  const results = await Promise.allSettled(
+    readers.map((reader) =>
+      withTimeout(
+        Promise.resolve().then(() => reader(now)),
+        READER_TIMEOUT_MS,
+      ),
+    ),
+  );
   for (const result of results) {
     if (
       result.status === 'fulfilled' &&
@@ -1901,7 +1926,7 @@ async function collectCliUsageReports(opts?: {
       reports.push(result.value);
     }
   }
-  await Promise.all(
+  await Promise.allSettled(
     reports.map(async (report) => {
       const samples = pricingSamplesByReport.get(report);
       if (samples) await applyOpenRouterEquivalentPricing(report, samples, now);

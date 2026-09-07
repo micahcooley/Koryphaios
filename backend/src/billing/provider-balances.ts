@@ -1,7 +1,12 @@
-// Live account balances — only four providers expose one to a normal API key
-// (verified July 2026): OpenRouter, DeepSeek, Moonshot/Kimi, DeepInfra.
-// Everything else requires admin/management keys or has no endpoint at all,
-// so we report exactly what is real and nothing more.
+// Live account balances — only providers that expose a balance to a normal
+// API key are probed (verified July–Sept 2026): OpenRouter, DeepSeek,
+// Moonshot/Kimi, DeepInfra, SiliconFlow, Novita, Vultr, DigitalOcean.
+// Everything else has no key-based endpoint: OpenAI needs a session or admin
+// key, xAI needs a management key + team id, Fireworks balance is an internal
+// gRPC method, Together billing needs org scope, Anthropic/Google/Groq/Cohere/
+// Mistral expose nothing, voice providers report characters (not USD), and
+// cloud/enterprise providers need separate IAM. Failures are per-provider and
+// resolve to null, so an unsupported provider never breaks the billing view.
 
 export interface ProviderBalance {
   provider: string;
@@ -76,6 +81,61 @@ const FETCHERS: Record<string, Fetcher> = {
     return {
       provider: 'deepinfra',
       availableUsd: typeof raw === 'number' ? Math.max(0, -raw) : null,
+      fetchedAt: Date.now(),
+    };
+  },
+  // GET /v1/user/info → { data: { totalBalance: "88.88" } } (USD string)
+  siliconflow: async (key) => {
+    const j = (await getJson('https://api.siliconflow.cn/v1/user/info', {
+      Authorization: `Bearer ${key}`,
+    })) as { data?: { totalBalance?: string; balance?: string } };
+    const raw = j.data?.totalBalance ?? j.data?.balance;
+    const v = raw != null ? Number(raw) : NaN;
+    return {
+      provider: 'siliconflow',
+      availableUsd: Number.isFinite(v) ? v : null,
+      fetchedAt: Date.now(),
+    };
+  },
+  // GET /openapi/v1/billing/balance/detail → { availableBalance: "1000000" }
+  // (unit is 1/10000 USD, so 10000 = $1.00)
+  'novita-ai': async (key) => {
+    const j = (await getJson('https://api.novita.ai/openapi/v1/billing/balance/detail', {
+      Authorization: `Bearer ${key}`,
+    })) as { availableBalance?: string };
+    const v = j.availableBalance != null ? Number(j.availableBalance) / 10_000 : NaN;
+    return {
+      provider: 'novita-ai',
+      availableUsd: Number.isFinite(v) ? v : null,
+      fetchedAt: Date.now(),
+    };
+  },
+  // GET /v2/account → { account: { balance, pending_charges } }
+  // (negative balance = credit; pending charges are unbilled usage)
+  vultr: async (key) => {
+    const j = (await getJson('https://api.vultr.com/v2/account', {
+      Authorization: `Bearer ${key}`,
+    })) as { account?: { balance?: number; pending_charges?: number } };
+    const balance = j.account?.balance;
+    const pending = j.account?.pending_charges ?? 0;
+    return {
+      provider: 'vultr',
+      availableUsd: typeof balance === 'number' ? Math.max(0, -balance - pending) : null,
+      detail: typeof balance === 'number' ? `pending $${pending.toFixed(2)}` : undefined,
+      fetchedAt: Date.now(),
+    };
+  },
+  // GET /v2/customers/my/balance → { account_balance: "12.23", month_to_date_usage }
+  digitalocean: async (key) => {
+    const j = (await getJson('https://api.digitalocean.com/v2/customers/my/balance', {
+      Authorization: `Bearer ${key}`,
+    })) as { account_balance?: string; month_to_date_usage?: string };
+    const v = j.account_balance != null ? Number(j.account_balance) : NaN;
+    const used = j.month_to_date_usage != null ? Number(j.month_to_date_usage) : NaN;
+    return {
+      provider: 'digitalocean',
+      availableUsd: Number.isFinite(v) ? Math.max(0, v) : null,
+      ...(Number.isFinite(used) ? { usedUsd: used } : {}),
       fetchedAt: Date.now(),
     };
   },
