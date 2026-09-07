@@ -82,10 +82,9 @@ Build the package, then configure an MCP client to start the compiled stdio entr
 
 The server writes protocol messages to stdout. Normal console logging is disabled in MCP mode so logs cannot corrupt that stream.
 
-The bundled debugging server is registered in Devin at all three supported
-scopes: the project `.devin/mcp_config.json`, the project-local
-`.devin/mcp_config.local.json`, and the user
-`~/.config/devin/mcp_config.json`. Each points at the built `dist/index.js`
+The bundled debugging server is registered in Devin at the machine-local
+scopes: the project-local `.devin/mcp_config.local.json` and the user
+`~/.config/devin/mcp_config.json` (both local-only, never committed). Each points at the built `dist/index.js`
 entrypoint and uses stdio; build the package before starting a fresh client.
 
 ## Configuration

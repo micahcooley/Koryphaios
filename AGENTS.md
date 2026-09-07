@@ -25,7 +25,7 @@
   - The bridge server (`kory-mcp-bridge.ts`) uses `fromJsonSchema()` from `@modelcontextprotocol/server` to wrap the dynamic JSON Schemas fetched from the backend catalog at runtime. This provides the same automatic validation that Zod-based tools get, but for JSON Schema objects.
 - Errors from `McpServer` use `ProtocolError` / `ProtocolErrorCode` (renamed from `McpError` / `ErrorCode`). Unknown tools throw `ProtocolError(InvalidParams, "Tool <name> not found")`.
 - Build the error-detection server before registering it: `bun run --filter @koryphaios/mcp-server build` (entry point is `mcp-server/dist/index.js`).
-- The error-detection server is registered in Devin CLI at all three MCP config scopes: project (`.devin/mcp_config.json`), local (`.devin/mcp_config.local.json`), and user (`~/.config/devin/mcp_config.json`).
+- The error-detection server is registered in Devin CLI at the machine-local scopes: project-local (`.devin/mcp_config.local.json`) and user (`~/.config/devin/mcp_config.json`). These are local-only and never committed.
 - Note: `backend/src/validation/schemas.ts` defines Koryphaios's own Zod HTTP API schemas named `*RequestSchema` (e.g. `CreateSessionRequestSchema`). These are NOT MCP SDK schemas and are unrelated to the v1-to-v2 migration.
 
 ## Freebuff and Codebuff providers

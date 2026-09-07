@@ -18,6 +18,8 @@ data/*.db-*
 *.db-shm
 
 # Local / scratch
+.devin/
+.gemini/
 typecheck_output*.txt
 *.AppImage
 test-results/
